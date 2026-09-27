@@ -33,6 +33,7 @@ function baseCfg(over: Partial<BotConfig> = {}): BotConfig {
     marketDataSource: "pumpfun",
     ledgerDir: "data",
     activePreset: "custom",
+    requireChecklistGo: false,
     ...over,
   };
 }

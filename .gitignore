@@ -6,6 +6,8 @@ data/ledger.json
 data/trades.csv
 data/trades.json
 data/runtime-config.json
+data/journal.json
+data/checklists.json
 *.log
 .DS_Store
 coverage/

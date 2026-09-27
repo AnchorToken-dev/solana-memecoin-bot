@@ -9,7 +9,7 @@ import {
   ensureAlertPermission,
 } from "./alerts";
 
-type Tab = "status" | "control" | "bankroll" | "journal" | "settings";
+type Tab = "status" | "control" | "bankroll" | "checklist" | "journal" | "settings";
 
 const app = document.querySelector("#app")!;
 let tab: Tab = "status";
@@ -53,7 +53,7 @@ async function render() {
     </header>
     <main id="main"></main>
     <nav class="tabs">
-      ${(["status","control","bankroll","journal","settings"] as Tab[]).map((t) =>
+      ${(["status","control","bankroll","checklist","journal","settings"] as Tab[]).map((t) =>
         `<button data-tab="${t}" class="${tab===t?"active":""}">${label(t)}</button>`
       ).join("")}
     </nav>
@@ -108,6 +108,7 @@ async function render() {
     if (tab === "status") await paintStatus(main);
     else if (tab === "control") await paintControl(main);
     else if (tab === "bankroll") await paintBankroll(main);
+    else if (tab === "checklist") await paintChecklist(main);
     else if (tab === "journal") await paintJournal(main);
   } catch (e) {
     error = e instanceof ApiError || e instanceof Error ? e.message : String(e);
@@ -124,7 +125,7 @@ async function render() {
 }
 
 function label(t: Tab): string {
-  return ({ status: "Status", control: "Run", bankroll: "PnL", journal: "Journal", settings: "Settings" })[t];
+  return ({ status: "Status", control: "Run", bankroll: "PnL", checklist: "Check", journal: "Journal", settings: "Settings" })[t];
 }
 
 async function paintStatus(main: Element) {
@@ -327,7 +328,193 @@ function renderOpenPosition(pos: {
     </div>`;
 }
 
+
+type CheckStatusUI = "pass" | "fail" | "skip" | "unset";
+
+function localVerdict(
+  items: Array<{ required: boolean; status: CheckStatusUI }>,
+  thesis: string,
+  invalidation: string,
+): "GO" | "NO-GO" | "INCOMPLETE" {
+  if (!thesis.trim() || !invalidation.trim()) return "INCOMPLETE";
+  let fail = false;
+  let incomplete = false;
+  for (const it of items) {
+    if (it.status === "fail") {
+      fail = true;
+      continue;
+    }
+    if (it.required) {
+      if (it.status !== "pass") incomplete = true;
+    } else if (it.status === "unset") {
+      incomplete = true;
+    }
+  }
+  if (fail) return "NO-GO";
+  if (incomplete) return "INCOMPLETE";
+  return "GO";
+}
+
+async function paintChecklist(main: Element) {
+  const [tpl, recent, portfolio] = await Promise.all([
+    api.checklistTemplate(),
+    api.checklist(15, 0),
+    api.portfolio().catch(() => null),
+  ]);
+  const openMint = portfolio?.portfolio?.openPositions?.[0]?.mint ?? "";
+  const openSym = portfolio?.portfolio?.openPositions?.[0]?.symbol ?? "";
+  const items = tpl.items.map((i) => ({ ...i, status: i.status as CheckStatusUI }));
+
+  const renderForm = () => {
+    const verdict = localVerdict(
+      items,
+      (main.querySelector("#clThesis") as HTMLTextAreaElement | null)?.value ?? "",
+      (main.querySelector("#clInv") as HTMLTextAreaElement | null)?.value ?? "",
+    );
+    const verdictClass =
+      verdict === "GO" ? "verdict-go" : verdict === "NO-GO" ? "verdict-nogo" : "verdict-incomplete";
+    const mintVal = (main.querySelector("#clMint") as HTMLInputElement | null)?.value ?? openMint;
+    const symVal = (main.querySelector("#clSymbol") as HTMLInputElement | null)?.value ?? openSym;
+    const linkVal = (main.querySelector("#clLink") as HTMLInputElement | null)?.value ?? "";
+    const thesisVal = (main.querySelector("#clThesis") as HTMLTextAreaElement | null)?.value ?? "";
+    const invVal = (main.querySelector("#clInv") as HTMLTextAreaElement | null)?.value ?? "";
+
+    const itemRows = items
+      .map((it, idx) => {
+        const opt = it.required ? "" : ` <span class="muted">(optional)</span>`;
+        return `<div class="check-row" data-idx="${idx}">
+          <div class="check-label">${escapeHtml(it.label)}${opt}</div>
+          <div class="check-btns" role="group">
+            ${(["pass", "fail", "skip"] as const)
+              .map(
+                (s) =>
+                  `<button type="button" class="check-btn ${it.status === s ? "active-" + s : ""}" data-idx="${idx}" data-status="${s}">${
+                    s === "pass" ? "Pass" : s === "fail" ? "Fail" : "Skip"
+                  }</button>`,
+              )
+              .join("")}
+          </div>
+        </div>`;
+      })
+      .join("");
+
+    const recentHtml =
+      (recent.entries ?? []).length === 0
+        ? `<p class="muted">No saved checklists yet.</p>`
+        : recent.entries
+            .map((e) => {
+              const vc =
+                e.verdict === "GO"
+                  ? "pnl-pos"
+                  : e.verdict === "NO-GO"
+                    ? "pnl-neg"
+                    : "muted";
+              return `<div class="journal-row" style="cursor:default">
+                <div class="journal-top">
+                  <strong>${escapeHtml(e.symbol || e.mint.slice(0, 8))}</strong>
+                  <span class="${vc}">${escapeHtml(e.verdict)}</span>
+                </div>
+                <div class="muted">${fmtTs(e.timestamp)} · ${escapeHtml(e.mint.slice(0, 12))}…</div>
+                ${e.thesis ? `<div class="journal-note">${escapeHtml(e.thesis.slice(0, 100))}</div>` : ""}
+              </div>`;
+            })
+            .join("");
+
+    main.innerHTML = `
+      <div class="card">
+        <h2>Research checklist</h2>
+        <p class="muted">Human go/no-go before sizing. Bot still filters age/liq/volume. <strong>Advisory</strong> unless Settings → require GO is on.</p>
+        <div class="verdict-banner ${verdictClass}" id="clVerdict">${escapeHtml(verdict)}</div>
+        <label for="clMint">Mint</label>
+        <input id="clMint" type="text" value="${escapeAttr(mintVal)}" placeholder="Token mint address" />
+        <label for="clSymbol" style="margin-top:8px">Symbol (optional)</label>
+        <input id="clSymbol" type="text" value="${escapeAttr(symVal)}" placeholder="TICKER" />
+        <label for="clLink" style="margin-top:8px">DexScreener / Pump.fun link (optional)</label>
+        <input id="clLink" type="url" value="${escapeAttr(linkVal)}" placeholder="https://…" />
+        <div style="margin-top:12px">${itemRows}</div>
+        <label for="clThesis" style="margin-top:12px">Thesis (one line)</label>
+        <textarea id="clThesis" rows="2" placeholder="Why this trade?">${escapeHtml(thesisVal)}</textarea>
+        <label for="clInv" style="margin-top:8px">Invalidation (when to skip / exit)</label>
+        <textarea id="clInv" rows="2" placeholder="When would you pass or cut?">${escapeHtml(invVal)}</textarea>
+        <div class="actions">
+          <button class="primary" id="clSave" ${busy ? "disabled" : ""}>Save checklist</button>
+          <button class="secondary" id="clPrefill" ${busy || !openMint ? "disabled" : ""}>Prefill open mint</button>
+          <button class="secondary" id="clRefresh">Refresh</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Recent (${escapeHtml(String(recent.total))})</h2>
+        ${recentHtml}
+      </div>`;
+
+    const bump = () => {
+      // Re-read texts, recompute banner without full wipe of focus when possible
+      const v = localVerdict(
+        items,
+        (main.querySelector("#clThesis") as HTMLTextAreaElement).value,
+        (main.querySelector("#clInv") as HTMLTextAreaElement).value,
+      );
+      const el = main.querySelector("#clVerdict");
+      if (el) {
+        el.textContent = v;
+        el.className = `verdict-banner ${
+          v === "GO" ? "verdict-go" : v === "NO-GO" ? "verdict-nogo" : "verdict-incomplete"
+        }`;
+      }
+    };
+
+    main.querySelectorAll("button.check-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const idx = Number((btn as HTMLButtonElement).dataset.idx);
+        const st = (btn as HTMLButtonElement).dataset.status as CheckStatusUI;
+        if (!Number.isFinite(idx) || !items[idx]) return;
+        items[idx]!.status = st;
+        // Re-paint buttons for this row
+        const row = main.querySelector(`.check-row[data-idx="${idx}"]`);
+        row?.querySelectorAll("button.check-btn").forEach((b) => {
+          const bb = b as HTMLButtonElement;
+          const s = bb.dataset.status!;
+          bb.className = `check-btn ${items[idx]!.status === s ? "active-" + s : ""}`;
+        });
+        bump();
+      });
+    });
+    main.querySelector("#clThesis")?.addEventListener("input", () => bump());
+    main.querySelector("#clInv")?.addEventListener("input", () => bump());
+    main.querySelector("#clRefresh")?.addEventListener("click", () => void render());
+    main.querySelector("#clPrefill")?.addEventListener("click", () => {
+      const m = main.querySelector("#clMint") as HTMLInputElement;
+      const s = main.querySelector("#clSymbol") as HTMLInputElement;
+      if (openMint) m.value = openMint;
+      if (openSym) s.value = openSym;
+      if (openMint && !(main.querySelector("#clLink") as HTMLInputElement).value) {
+        (main.querySelector("#clLink") as HTMLInputElement).value =
+          `https://dexscreener.com/solana/${encodeURIComponent(openMint)}`;
+      }
+    });
+    main.querySelector("#clSave")?.addEventListener("click", () => {
+      void withBusy(async () => {
+        const body = {
+          mint: (main.querySelector("#clMint") as HTMLInputElement).value.trim(),
+          symbol: (main.querySelector("#clSymbol") as HTMLInputElement).value.trim(),
+          link: (main.querySelector("#clLink") as HTMLInputElement).value.trim(),
+          thesis: (main.querySelector("#clThesis") as HTMLTextAreaElement).value,
+          invalidation: (main.querySelector("#clInv") as HTMLTextAreaElement).value,
+          items: items.map((i) => ({ id: i.id, status: i.status })),
+        };
+        const r = await api.createChecklist(body);
+        message = r.ok
+          ? `Saved ${r.entry.verdict} checklist for ${r.entry.symbol || r.entry.mint.slice(0, 8)}`
+          : (r.message ?? "Save failed");
+      });
+    });
+  };
+
+  renderForm();
+}
+
 async function paintJournal(main: Element) {
+
   const data = await api.journal(50, 0);
   const entries = data.entries ?? [];
   main.innerHTML = `
@@ -439,6 +626,20 @@ async function paintSettings(main: Element, base: string) {
       <p class="muted" style="margin-top:10px">Saved to server <code>data/runtime-config.json</code> (survives restart). Live / wallet fields are rejected by the API.</p>
     </div>
     <div class="card">
+      <h2>Research checklist gate</h2>
+      <p class="muted">When <strong>on</strong>, the paper bot skips entries unless a saved checklist for that mint has verdict <strong>GO</strong>. Default <strong>off</strong> (checklist is advisory only).</p>
+      <div class="row">
+        <span class="k">Require GO before entry</span>
+        <span class="v">
+          <label class="toggle">
+            <input type="checkbox" id="requireGoToggle" ${cfg.requireChecklistGo === true ? "checked" : ""} ${busy||running?"disabled":""} />
+            <span>${cfg.requireChecklistGo === true ? "On" : "Off"}</span>
+          </label>
+        </span>
+      </div>
+      ${running ? `<p class="muted warn-text" style="margin-top:8px">Stop the runner before changing this gate.</p>` : ""}
+    </div>
+    <div class="card">
       <h2>Session alerts</h2>
       <p class="muted">Local Android notifications for paper start/stop, opens, closes (with PnL), daily loss, and exit reasons. Default <strong>on</strong>.</p>
       <div class="row">
@@ -517,6 +718,28 @@ async function paintSettings(main: Element, base: string) {
       message = "Reset to default";
     });
   });
+
+  main.querySelector("#requireGoToggle")?.addEventListener("change", (ev) => {
+    const on = (ev.target as HTMLInputElement).checked;
+    void withBusy(async () => {
+      const r = await api.patchConfig({ requireChecklistGo: on });
+      message = r.message;
+    });
+  });
+  main.querySelector("#alertToggle")?.addEventListener("change", (ev) => {
+    const on = (ev.target as HTMLInputElement).checked;
+    void withBusy(async () => {
+      await setSessionAlertsEnabled(on);
+      if (on) await ensureAlertPermission();
+      message = on ? "Session alerts on" : "Session alerts off";
+    });
+  });
+  main.querySelector("#alertPerm")?.addEventListener("click", () => {
+    void withBusy(async () => {
+      const ok = await ensureAlertPermission();
+      message = ok ? "Notification permission granted (or already granted)" : "Notification permission denied";
+    });
+  });
 }
 
 /** Update PnL numbers without rebuilding the chart iframe. */
@@ -571,7 +794,7 @@ function escapeAttr(s: string): string {
 void render();
 setInterval(() => {
   void pollSessionAlerts();
-  if (busy || document.hidden || tab === "settings") return;
+  if (busy || document.hidden || tab === "settings" || tab === "checklist") return;
   // Keep the live chart iframe mounted; only soft-update numbers on PnL.
   if (tab === "bankroll" && document.querySelector(".chart-frame")) {
     void softRefreshBankroll();

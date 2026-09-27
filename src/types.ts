@@ -66,6 +66,11 @@ export interface BotConfig {
    * `custom` when individual knobs were patched away from a named preset.
    */
   activePreset: ActivePreset;
+  /**
+   * When true, paper entries require a saved research checklist with verdict GO
+   * for that mint. Default false — checklist is advisory only (v1).
+   */
+  requireChecklistGo: boolean;
 }
 
 export interface TokenSnapshot {

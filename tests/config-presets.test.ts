@@ -46,6 +46,7 @@ function baseCfg(over: Partial<BotConfig> = {}): BotConfig {
     marketDataSource: "mock",
     ledgerDir: "data",
     activePreset: "custom",
+    requireChecklistGo: false,
     ...over,
   };
 }
