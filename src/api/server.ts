@@ -205,6 +205,20 @@ export function createControlApp(engine: BotEngine) {
    * Paper trade journal (closed fills + notes). Survives /runner/reset.
    * Newest first. Query: ?limit=&offset=
    */
+  /**
+   * Session alert events since `?since=` (epoch ms, exclusive).
+   * Phone polls this and fires Capacitor local notifications.
+   */
+  app.get("/alerts", (req, res) => {
+    const sinceRaw = Number(req.query.since ?? 0);
+    const since = Number.isFinite(sinceRaw) ? Math.max(0, sinceRaw) : 0;
+    const limitRaw = Number(req.query.limit ?? 50);
+    const limit = Number.isFinite(limitRaw)
+      ? Math.min(Math.max(1, Math.floor(limitRaw)), 100)
+      : 50;
+    res.json(engine.getAlerts(since, limit));
+  });
+
   app.get("/journal", (req, res) => {
     const limitRaw = Number(req.query.limit ?? 50);
     const offsetRaw = Number(req.query.offset ?? 0);

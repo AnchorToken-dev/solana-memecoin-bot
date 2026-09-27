@@ -136,6 +136,9 @@ npm run api
 | GET | `/journal?limit=&offset=` | **Trade journal** — closed paper trades newest first (survives Reset) |
 | PATCH | `/journal/:id` | Body `{ "note": "…" }` — edit learning note |
 | DELETE | `/journal` | Explicit journal clear only (Reset does **not** clear journal) |
+| GET | `/alerts?since=` | Session events for phone local notifications (start/stop/open/close/daily loss) |
+
+**Session alerts:** Android app Settings toggle (default on) polls `/alerts` and fires Capacitor Local Notifications while the app process is alive. Grant notification permission on first Start or via Settings.
 
 CORS is open for local mobile / LAN browsers. Writes that start trading refuse unless `PAPER_MODE=true`. Live trading stays stubbed.
 

@@ -1,6 +1,13 @@
 import "./styles.css";
 import { api, ApiError } from "./api";
 import { DEFAULT_API_BASE, getApiBaseUrl, setApiBaseUrl } from "./settings";
+import {
+  getSessionAlertsEnabled,
+  setSessionAlertsEnabled,
+  pollSessionAlerts,
+  onStartRequestAlerts,
+  ensureAlertPermission,
+} from "./alerts";
 
 type Tab = "status" | "control" | "bankroll" | "journal" | "settings";
 
@@ -193,6 +200,7 @@ async function paintControl(main: Element) {
     </div>`;
   main.querySelector("#start")?.addEventListener("click", () => {
     void withBusy(async () => {
+      await onStartRequestAlerts();
       const r = await api.start();
       message = r.message;
     });
@@ -378,7 +386,11 @@ async function paintJournal(main: Element) {
 }
 
 async function paintSettings(main: Element, base: string) {
-  const [cfgWrap, status] = await Promise.all([api.config(), api.status()]);
+  const [cfgWrap, status, alertsOn] = await Promise.all([
+    api.config(),
+    api.status(),
+    getSessionAlertsEnabled(),
+  ]);
   const cfg = cfgWrap.config ?? {};
   const mom = (cfg.momentum ?? {}) as Record<string, number>;
   const trail = (cfg.trailingTakeProfit ?? {}) as Record<string, number>;
@@ -425,6 +437,22 @@ async function paintSettings(main: Element, base: string) {
         <button class="secondary" id="refreshCfg">Refresh</button>
       </div>
       <p class="muted" style="margin-top:10px">Saved to server <code>data/runtime-config.json</code> (survives restart). Live / wallet fields are rejected by the API.</p>
+    </div>
+    <div class="card">
+      <h2>Session alerts</h2>
+      <p class="muted">Local Android notifications for paper start/stop, opens, closes (with PnL), daily loss, and exit reasons. Default <strong>on</strong>.</p>
+      <div class="row">
+        <span class="k">Session alerts</span>
+        <span class="v">
+          <label class="toggle">
+            <input type="checkbox" id="alertToggle" ${alertsOn ? "checked" : ""} />
+            <span>${alertsOn ? "On" : "Off"}</span>
+          </label>
+        </span>
+      </div>
+      <div class="actions">
+        <button class="secondary" id="alertPerm" ${busy ? "disabled" : ""}>Request notification permission</button>
+      </div>
     </div>
     <div class="card">
       <h2>API base URL</h2>
@@ -542,6 +570,7 @@ function escapeAttr(s: string): string {
 
 void render();
 setInterval(() => {
+  void pollSessionAlerts();
   if (busy || document.hidden || tab === "settings") return;
   // Keep the live chart iframe mounted; only soft-update numbers on PnL.
   if (tab === "bankroll" && document.querySelector(".chart-frame")) {
@@ -550,3 +579,6 @@ setInterval(() => {
   }
   void render();
 }, 8000);
+
+// Warm alert cursor so first events after app open are caught.
+void pollSessionAlerts();
