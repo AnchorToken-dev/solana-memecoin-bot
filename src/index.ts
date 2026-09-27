@@ -47,6 +47,8 @@ async function main(): Promise<void> {
   Portfolio: http://127.0.0.1:${port}/portfolio
   Trades:    http://127.0.0.1:${port}/trades
   Config:    http://127.0.0.1:${port}/config
+  Patch:     PATCH http://127.0.0.1:${port}/config  (paper knobs; stop runner first)
+  Preset:    POST  http://127.0.0.1:${port}/config/preset  { "preset": "momentum"|"sniper" }
 
 Phone: set API base URL in the app Settings.
   Emulator / USB: adb reverse tcp:${port} tcp:${port}  → http://127.0.0.1:${port}

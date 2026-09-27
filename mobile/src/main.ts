@@ -63,36 +63,35 @@ async function render() {
   if (message) main.insertAdjacentHTML("beforeend", `<div class="ok">${escapeHtml(message)}</div>`);
 
   if (tab === "settings") {
-    main.insertAdjacentHTML("beforeend", `
-      <div class="card">
-        <h2>API base URL</h2>
-        <label for="apiUrl">No private keys — only the control HTTP API</label>
-        <input id="apiUrl" type="url" value="${escapeAttr(base)}" placeholder="${DEFAULT_API_BASE}" />
-        <div class="actions">
-          <button class="primary" id="saveUrl">Save</button>
-          <button class="secondary" id="resetUrl">Reset default</button>
-        </div>
-        <p class="muted" style="margin-top:12px">
-          USB / emulator: <code>adb reverse tcp:8787 tcp:8787</code> then use
-          <code>http://127.0.0.1:8787</code>.<br/>
-          Same Wi‑Fi: <code>http://&lt;laptop-lan-ip&gt;:8787</code>
-          (laptop: <code>npm run api</code>, firewall allow 8787).
-        </p>
-      </div>
-    `);
-    main.querySelector("#saveUrl")!.addEventListener("click", () => {
-      const v = (main.querySelector("#apiUrl") as HTMLInputElement).value;
-      void withBusy(async () => {
-        await setApiBaseUrl(v);
-        message = "Saved API URL";
+    main.insertAdjacentHTML("beforeend", `<div class="card"><p class="muted">Loading settings…</p></div>`);
+    try {
+      await paintSettings(main, base);
+    } catch (e) {
+      error = e instanceof ApiError || e instanceof Error ? e.message : String(e);
+      main.innerHTML = `
+        <div class="err">${escapeHtml(error)}</div>
+        <div class="card">
+          <h2>API base URL</h2>
+          <label for="apiUrl">Set the control API so bot settings can load</label>
+          <input id="apiUrl" type="url" value="${escapeAttr(base)}" placeholder="${DEFAULT_API_BASE}" />
+          <div class="actions">
+            <button class="primary" id="saveUrl">Save URL</button>
+            <button class="secondary" id="retry">Retry</button>
+          </div>
+          <p class="muted" style="margin-top:12px">
+            USB / emulator: <code>adb reverse tcp:8787 tcp:8787</code> →
+            <code>http://127.0.0.1:8787</code>. Laptop: <code>npm run api</code>.
+          </p>
+        </div>`;
+      main.querySelector("#saveUrl")?.addEventListener("click", () => {
+        const v = (main.querySelector("#apiUrl") as HTMLInputElement).value;
+        void withBusy(async () => {
+          await setApiBaseUrl(v);
+          message = "Saved API URL";
+        });
       });
-    });
-    main.querySelector("#resetUrl")!.addEventListener("click", () => {
-      void withBusy(async () => {
-        await setApiBaseUrl(DEFAULT_API_BASE);
-        message = "Reset to default";
-      });
-    });
+      main.querySelector("#retry")?.addEventListener("click", () => void render());
+    }
     return;
   }
 
@@ -342,6 +341,119 @@ async function paintTrades(main: Element) {
       <div class="actions"><button class="secondary" id="refresh">Refresh</button></div>
     </div>`;
   main.querySelector("#refresh")?.addEventListener("click", () => void render());
+}
+
+async function paintSettings(main: Element, base: string) {
+  const [cfgWrap, status] = await Promise.all([api.config(), api.status()]);
+  const cfg = cfgWrap.config ?? {};
+  const mom = (cfg.momentum ?? {}) as Record<string, number>;
+  const trail = (cfg.trailingTakeProfit ?? {}) as Record<string, number>;
+  const runner = (cfg.runner ?? {}) as Record<string, number>;
+  const active = String(cfg.activePreset ?? "custom");
+  const running = status.state === "running" || status.state === "starting";
+  const num = (v: unknown, fallback = ""): string =>
+    typeof v === "number" && Number.isFinite(v) ? String(v) : fallback;
+
+  main.innerHTML = `
+    <div class="card">
+      <h2>Strategy preset</h2>
+      <p class="muted">Paper knobs only. Applying a preset requires the runner <strong>stopped</strong>.</p>
+      <div class="row"><span class="k">Active preset</span><span class="v" id="activePresetLabel">${escapeHtml(active)}</span></div>
+      <div class="preset-toggle" role="group" aria-label="Preset">
+        <button type="button" class="preset-btn ${active==="momentum"?"active":""}" id="presetMomentum" ${busy||running?"disabled":""}>Momentum</button>
+        <button type="button" class="preset-btn ${active==="sniper"?"active":""}" id="presetSniper" ${busy||running?"disabled":""}>Sniper</button>
+      </div>
+      ${running ? `<p class="muted warn-text" style="margin-top:8px">Runner is ${escapeHtml(String(status.state))} — stop it on the Run tab before switching presets or saving.</p>` : ""}
+      <p class="muted" style="margin-top:8px">
+        <strong>Momentum</strong>: Pump.fun research defaults (10% stop, +25% TP, min age 3m, liq $5k).<br/>
+        <strong>Sniper</strong>: newer coins OK (age 0), lower liq/vol floors, 8% stop, +15% TP, faster trail / shorter hold.
+      </p>
+    </div>
+    <div class="card">
+      <h2>Paper parameters</h2>
+      <div class="field-grid">
+        <label>Bankroll USD<input id="fBankroll" type="number" step="0.01" min="0.01" value="${escapeAttr(num(cfg.bankrollUsd))}" /></label>
+        <label>Stop loss %<input id="fStop" type="number" step="0.1" min="0.1" value="${escapeAttr(num(cfg.stopLossPct))}" /></label>
+        <label>Take profit %<input id="fTp" type="number" step="0.1" min="0" value="${escapeAttr(num(cfg.takeProfitPct))}" /></label>
+        <label>Trail activate %<input id="fTrailAct" type="number" step="0.1" min="0.1" value="${escapeAttr(num(trail.activatePct))}" /></label>
+        <label>Trail distance %<input id="fTrailDist" type="number" step="0.1" min="0.1" value="${escapeAttr(num(trail.distancePct))}" /></label>
+        <label>Max hold min<input id="fHold" type="number" step="1" min="0" value="${escapeAttr(num(cfg.maxHoldMinutes))}" /></label>
+        <label>Daily loss USD<input id="fDaily" type="number" step="0.01" min="0" value="${escapeAttr(num(cfg.dailyLossUsd))}" /></label>
+        <label>Poll interval ms<input id="fPoll" type="number" step="100" min="100" value="${escapeAttr(num(runner.pollIntervalMs))}" /></label>
+        <label>Momentum min %<input id="fMomPct" type="number" step="0.1" min="0.1" value="${escapeAttr(num(mom.minPct))}" /></label>
+        <label>Min age min<input id="fAge" type="number" step="1" min="0" value="${escapeAttr(num(mom.minAgeMinutes))}" /></label>
+        <label>Min liquidity USD<input id="fLiq" type="number" step="100" min="0" value="${escapeAttr(num(mom.minLiquidityUsd))}" /></label>
+        <label>Min vol 24h USD<input id="fVol" type="number" step="100" min="0" value="${escapeAttr(num(mom.minVolume24hUsd))}" /></label>
+      </div>
+      <div class="actions">
+        <button class="primary" id="saveCfg" ${busy||running?"disabled":""}>Save</button>
+        <button class="secondary" id="refreshCfg">Refresh</button>
+      </div>
+      <p class="muted" style="margin-top:10px">Saved to server <code>data/runtime-config.json</code> (survives restart). Live / wallet fields are rejected by the API.</p>
+    </div>
+    <div class="card">
+      <h2>API base URL</h2>
+      <label for="apiUrl">No private keys — only the control HTTP API</label>
+      <input id="apiUrl" type="url" value="${escapeAttr(base)}" placeholder="${DEFAULT_API_BASE}" />
+      <div class="actions">
+        <button class="primary" id="saveUrl">Save URL</button>
+        <button class="secondary" id="resetUrl">Reset default</button>
+      </div>
+      <p class="muted" style="margin-top:12px">
+        USB / emulator: <code>adb reverse tcp:8787 tcp:8787</code> then use
+        <code>http://127.0.0.1:8787</code>.<br/>
+        Same Wi‑Fi: <code>http://&lt;laptop-lan-ip&gt;:8787</code>
+        (laptop: <code>npm run api</code>, firewall allow 8787).
+      </p>
+    </div>
+  `;
+
+  const applyPreset = (preset: "momentum" | "sniper") => {
+    void withBusy(async () => {
+      const r = await api.applyPreset(preset);
+      message = r.message;
+    });
+  };
+  main.querySelector("#presetMomentum")?.addEventListener("click", () => applyPreset("momentum"));
+  main.querySelector("#presetSniper")?.addEventListener("click", () => applyPreset("sniper"));
+  main.querySelector("#refreshCfg")?.addEventListener("click", () => void render());
+  main.querySelector("#saveCfg")?.addEventListener("click", () => {
+    const n = (id: string) => Number((main.querySelector(`#${id}`) as HTMLInputElement).value);
+    void withBusy(async () => {
+      const r = await api.patchConfig({
+        bankrollUsd: n("fBankroll"),
+        stopLossPct: n("fStop"),
+        takeProfitPct: n("fTp"),
+        maxHoldMinutes: n("fHold"),
+        dailyLossUsd: n("fDaily"),
+        trailingTakeProfit: {
+          activatePct: n("fTrailAct"),
+          distancePct: n("fTrailDist"),
+        },
+        runner: { pollIntervalMs: n("fPoll") },
+        momentum: {
+          minPct: n("fMomPct"),
+          minAgeMinutes: n("fAge"),
+          minLiquidityUsd: n("fLiq"),
+          minVolume24hUsd: n("fVol"),
+        },
+      });
+      message = r.message;
+    });
+  });
+  main.querySelector("#saveUrl")!.addEventListener("click", () => {
+    const v = (main.querySelector("#apiUrl") as HTMLInputElement).value;
+    void withBusy(async () => {
+      await setApiBaseUrl(v);
+      message = "Saved API URL";
+    });
+  });
+  main.querySelector("#resetUrl")!.addEventListener("click", () => {
+    void withBusy(async () => {
+      await setApiBaseUrl(DEFAULT_API_BASE);
+      message = "Reset to default";
+    });
+  });
 }
 
 /** Update PnL numbers without rebuilding the chart iframe. */

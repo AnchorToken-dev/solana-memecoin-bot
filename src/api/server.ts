@@ -20,7 +20,7 @@ export function createControlApp(engine: BotEngine) {
     cors({
       // Local mobile / emulator / LAN browser UI
       origin: true,
-      methods: ["GET", "POST", "OPTIONS"],
+      methods: ["GET", "POST", "PUT", "PATCH", "OPTIONS"],
     }),
   );
   app.use(express.json({ limit: "32kb" }));
@@ -41,6 +41,63 @@ export function createControlApp(engine: BotEngine) {
   app.get("/config", (_req, res) => {
     // Safe read — BotConfig has no private keys; do not echo process.env.
     res.json({ config: engine.getPublicConfig() });
+  });
+
+  /**
+   * PATCH (or PUT) paper-safe knobs. Persists to data/runtime-config.json.
+   * Rejects live-dangerous fields. Requires runner stopped.
+   */
+  const patchConfigHandler = (
+    req: express.Request,
+    res: express.Response,
+  ): void => {
+    if (!engine.cfg.paperMode) {
+      res.status(403).json({
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing config changes while live mode is configured (live is stubbed).",
+        status: engine.getStatus(),
+        config: engine.getPublicConfig(),
+      });
+      return;
+    }
+    const result = engine.patchConfig(req.body);
+    if (!result.ok) {
+      const status =
+        result.message.includes("Stop the paper runner") ? 409 : 400;
+      res.status(status).json(result);
+      return;
+    }
+    res.status(200).json(result);
+  };
+  app.patch("/config", patchConfigHandler);
+  app.put("/config", patchConfigHandler);
+
+  /**
+   * Apply named preset: { "preset": "momentum" | "sniper" }.
+   * Requires runner stopped; persists overlay.
+   */
+  app.post("/config/preset", (req, res) => {
+    if (!engine.cfg.paperMode) {
+      res.status(403).json({
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing preset while live mode is configured (live is stubbed).",
+        status: engine.getStatus(),
+        config: engine.getPublicConfig(),
+      });
+      return;
+    }
+    const body = req.body as { preset?: unknown } | null;
+    const preset = body && typeof body === "object" ? body.preset : undefined;
+    const result = engine.applyPreset(preset);
+    if (!result.ok) {
+      const status =
+        result.message.includes("Stop the paper runner") ? 409 : 400;
+      res.status(status).json(result);
+      return;
+    }
+    res.status(200).json(result);
   });
 
   app.get("/portfolio", async (_req, res) => {

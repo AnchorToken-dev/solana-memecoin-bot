@@ -34,6 +34,7 @@ function baseCfg(over: Partial<BotConfig> = {}): BotConfig {
     dailyLossUsd: 5,
     marketDataSource: "mock",
     ledgerDir: "data",
+    activePreset: "custom",
     ...over,
   };
 }

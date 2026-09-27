@@ -101,4 +101,21 @@ export const api = {
       portfolio: Record<string, unknown>;
       fills?: Array<Record<string, unknown>>;
     }>("/runner/exit", { method: "POST" }),
+  patchConfig: (body: Record<string, unknown>) =>
+    request<{
+      ok: boolean;
+      message: string;
+      config: Record<string, unknown>;
+      status: Record<string, unknown>;
+    }>("/config", { method: "PATCH", body: JSON.stringify(body) }),
+  applyPreset: (preset: "momentum" | "sniper") =>
+    request<{
+      ok: boolean;
+      message: string;
+      config: Record<string, unknown>;
+      status: Record<string, unknown>;
+    }>("/config/preset", {
+      method: "POST",
+      body: JSON.stringify({ preset }),
+    }),
 };

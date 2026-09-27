@@ -14,6 +14,18 @@ import {
   isDailyLossBreached,
 } from "../risk/manager.js";
 import { log } from "../logging.js";
+import {
+  applyPaperPatch,
+  overlayFromConfig,
+  parsePaperConfigPatch,
+  saveRuntimeOverlay,
+} from "../config.js";
+import {
+  applyPresetKnobs,
+  isPresetName,
+  PRESET_NAMES,
+  type PresetName,
+} from "../presets.js";
 
 export type RunnerState = "stopped" | "starting" | "running" | "stopping";
 
@@ -61,6 +73,7 @@ function summarizeRejects(
 }
 
 export class BotEngine {
+  /** Mutable paper config (PATCH / preset when stopped). */
   readonly cfg: BotConfig;
   readonly market: MarketDataProvider;
   readonly broker: PaperBroker;
@@ -76,12 +89,17 @@ export class BotEngine {
   private abort: AbortController | null = null;
   private loopPromise: Promise<void> | null = null;
 
+  /** Where PATCH / preset persist the paper overlay (default data/runtime-config.json). */
+  private readonly runtimeConfigPath: string | undefined;
+
   constructor(
     cfg: BotConfig,
     deps?: {
       market?: MarketDataProvider;
       broker?: PaperBroker;
       ledger?: PaperLedger;
+      /** Absolute or relative path for runtime-config.json persistence. */
+      runtimeConfigPath?: string;
     },
   ) {
     this.cfg = cfg;
@@ -89,6 +107,7 @@ export class BotEngine {
     this.broker = deps?.broker ?? new PaperBroker(cfg);
     this.ledger =
       deps?.ledger ?? new PaperLedger(cfg.bankrollUsd, cfg.ledgerDir);
+    this.runtimeConfigPath = deps?.runtimeConfigPath;
   }
 
   getStatus(): EngineStatus {
@@ -113,8 +132,121 @@ export class BotEngine {
   }
 
   /** Public config — BotConfig has no secrets; wallet paths stay out of this object. */
-  getPublicConfig(): BotConfig {
-    return { ...this.cfg };
+  getPublicConfig(): BotConfig & {
+    availablePresets: readonly PresetName[];
+  } {
+    return {
+      ...this.cfg,
+      momentum: { ...this.cfg.momentum },
+      trailingTakeProfit: { ...this.cfg.trailingTakeProfit },
+      paperBroker: { ...this.cfg.paperBroker },
+      runner: { ...this.cfg.runner },
+      availablePresets: PRESET_NAMES,
+    };
+  }
+
+  /**
+   * Persist current paper knobs to data/runtime-config.json (or injected path).
+   */
+  persistRuntimeConfig(): string {
+    return saveRuntimeOverlay(
+      overlayFromConfig(this.cfg),
+      this.runtimeConfigPath,
+    );
+  }
+
+  /**
+   * PATCH paper-safe knobs. Requires runner stopped (safest — no mid-cycle drift).
+   * Persists to runtime overlay so restart keeps settings.
+   */
+  patchConfig(body: unknown): {
+    ok: boolean;
+    message: string;
+    status: EngineStatus;
+    config?: ReturnType<BotEngine["getPublicConfig"]>;
+    rejected?: string[];
+  } {
+    if (!this.cfg.paperMode) {
+      return {
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing config changes while live mode is configured (live is stubbed).",
+        status: this.getStatus(),
+      };
+    }
+    if (this.state !== "stopped") {
+      return {
+        ok: false,
+        message:
+          "Stop the paper runner before changing settings (POST /runner/stop). Preset/config changes are not applied while running.",
+        status: this.getStatus(),
+      };
+    }
+    const parsed = parsePaperConfigPatch(body);
+    if (!parsed.ok) {
+      return {
+        ok: false,
+        message: parsed.message,
+        status: this.getStatus(),
+        rejected: parsed.rejected,
+      };
+    }
+    applyPaperPatch(this.cfg, parsed.patch);
+    const path = this.persistRuntimeConfig();
+    log.info("Paper config patched + persisted", {
+      path,
+      activePreset: this.cfg.activePreset,
+    });
+    return {
+      ok: true,
+      message: `Config updated and saved to ${path}`,
+      status: this.getStatus(),
+      config: this.getPublicConfig(),
+    };
+  }
+
+  /**
+   * Apply a named preset (momentum | sniper), persist overlay.
+   * Requires runner stopped.
+   */
+  applyPreset(preset: unknown): {
+    ok: boolean;
+    message: string;
+    status: EngineStatus;
+    config?: ReturnType<BotEngine["getPublicConfig"]>;
+  } {
+    if (!this.cfg.paperMode) {
+      return {
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing preset while live mode is configured (live is stubbed).",
+        status: this.getStatus(),
+      };
+    }
+    if (this.state !== "stopped") {
+      return {
+        ok: false,
+        message:
+          "Stop the paper runner before applying a preset (POST /runner/stop).",
+        status: this.getStatus(),
+      };
+    }
+    if (!isPresetName(preset)) {
+      return {
+        ok: false,
+        message: `Unknown preset; use one of: ${PRESET_NAMES.join(", ")}`,
+        status: this.getStatus(),
+      };
+    }
+    applyPresetKnobs(this.cfg, preset);
+    const path = this.persistRuntimeConfig();
+    log.info("Paper preset applied + persisted", { preset, path });
+    return {
+      ok: true,
+      message: `Preset "${preset}" applied and saved to ${path}`,
+      status: this.getStatus(),
+      config: this.getPublicConfig(),
+    };
   }
 
   async getPortfolio(): Promise<PortfolioSnapshot> {

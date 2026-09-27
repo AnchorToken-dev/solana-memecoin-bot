@@ -32,6 +32,8 @@ export interface RunnerParams {
   maxCycles: number;
 }
 
+export type ActivePreset = "momentum" | "sniper" | "custom";
+
 export interface BotConfig {
   paperMode: boolean;
   bankrollUsd: number;
@@ -59,6 +61,11 @@ export interface BotConfig {
   dailyLossUsd: number;
   marketDataSource: "mock" | "dexscreener" | "pumpfun";
   ledgerDir: string;
+  /**
+   * Named paper preset last applied via API / overlay.
+   * `custom` when individual knobs were patched away from a named preset.
+   */
+  activePreset: ActivePreset;
 }
 
 export interface TokenSnapshot {

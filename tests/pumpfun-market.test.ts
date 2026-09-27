@@ -32,6 +32,7 @@ function baseCfg(over: Partial<BotConfig> = {}): BotConfig {
     dailyLossUsd: 5,
     marketDataSource: "pumpfun",
     ledgerDir: "data",
+    activePreset: "custom",
     ...over,
   };
 }
