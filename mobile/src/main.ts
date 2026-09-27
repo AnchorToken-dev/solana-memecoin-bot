@@ -2,7 +2,7 @@ import "./styles.css";
 import { api, ApiError } from "./api";
 import { DEFAULT_API_BASE, getApiBaseUrl, setApiBaseUrl } from "./settings";
 
-type Tab = "status" | "control" | "bankroll" | "trades" | "settings";
+type Tab = "status" | "control" | "bankroll" | "journal" | "settings";
 
 const app = document.querySelector("#app")!;
 let tab: Tab = "status";
@@ -46,7 +46,7 @@ async function render() {
     </header>
     <main id="main"></main>
     <nav class="tabs">
-      ${(["status","control","bankroll","trades","settings"] as Tab[]).map((t) =>
+      ${(["status","control","bankroll","journal","settings"] as Tab[]).map((t) =>
         `<button data-tab="${t}" class="${tab===t?"active":""}">${label(t)}</button>`
       ).join("")}
     </nav>
@@ -101,7 +101,7 @@ async function render() {
     if (tab === "status") await paintStatus(main);
     else if (tab === "control") await paintControl(main);
     else if (tab === "bankroll") await paintBankroll(main);
-    else if (tab === "trades") await paintTrades(main);
+    else if (tab === "journal") await paintJournal(main);
   } catch (e) {
     error = e instanceof ApiError || e instanceof Error ? e.message : String(e);
     main.innerHTML = `<div class="err">${escapeHtml(error)}</div>
@@ -117,7 +117,7 @@ async function render() {
 }
 
 function label(t: Tab): string {
-  return ({ status: "Status", control: "Run", bankroll: "PnL", trades: "Trades", settings: "Settings" })[t];
+  return ({ status: "Status", control: "Run", bankroll: "PnL", journal: "Journal", settings: "Settings" })[t];
 }
 
 async function paintStatus(main: Element) {
@@ -319,28 +319,62 @@ function renderOpenPosition(pos: {
     </div>`;
 }
 
-async function paintTrades(main: Element) {
-  const { trades } = await api.trades(40);
+async function paintJournal(main: Element) {
+  const data = await api.journal(50, 0);
+  const entries = data.entries ?? [];
   main.innerHTML = `
     <div class="card">
-      <h2>Recent trades</h2>
+      <h2>Trade journal</h2>
+      <p class="muted">Closed paper trades with notes. Survives session <strong>Reset</strong> — clear only via button below.</p>
+      <div class="row"><span class="k">Entries</span><span class="v">${escapeHtml(String(data.total))}</span></div>
       ${
-        trades.length === 0
-          ? `<p class="muted">No fills yet. Start the paper bot from the Run tab.</p>`
-          : trades.map((t) => {
-              const f = t.fill;
-              return `<div class="trade">
-                <div><strong>${escapeHtml(String(f.side).toUpperCase())} ${escapeHtml(String(f.symbol))}</strong>
-                · ${money(f.notionalUsd)}</div>
-                <div class="muted">${fmtTs(f.timestamp)} · ${escapeHtml(String(f.reason ?? "entry"))}
-                ${t.realizedPnlUsd != null ? ` · pnl ${money(t.realizedPnlUsd)}` : ""}
-                · cash ${money(t.cashAfter)}</div>
-              </div>`;
+        entries.length === 0
+          ? `<p class="muted">No closed trades yet. Exits (stop / TP / trail / manual / time) appear here.</p>`
+          : entries.map((e) => {
+              const pnlClass = e.pnlUsd >= 0 ? "pnl-pos" : "pnl-neg";
+              const notePreview = e.note?.trim()
+                ? escapeHtml(e.note.trim().slice(0, 80))
+                : `<span class="muted">Tap to add note</span>`;
+              return `<button type="button" class="journal-row" data-jid="${escapeAttr(e.id)}" data-note="${escapeAttr(e.note ?? "")}">
+                <div class="journal-top">
+                  <strong>${escapeHtml(e.symbol)}</strong>
+                  <span class="${pnlClass}">${money(e.pnlUsd)} (${e.pnlPct >= 0 ? "+" : ""}${e.pnlPct.toFixed(1)}%)</span>
+                </div>
+                <div class="muted">${fmtTs(e.timestamp)} · ${escapeHtml(e.exitReason)}
+                · size ${money(e.sizeUsd)}
+                · ${escapeHtml(String(e.entryPrice))} → ${escapeHtml(String(e.exitPrice))}</div>
+                <div class="journal-note">${notePreview}</div>
+              </button>`;
             }).join("")
       }
-      <div class="actions"><button class="secondary" id="refresh">Refresh</button></div>
+      <div class="actions">
+        <button class="secondary" id="refresh">Refresh</button>
+        <button class="danger" id="clearJournal" ${busy || entries.length===0 ? "disabled" : ""}>Clear journal</button>
+      </div>
     </div>`;
   main.querySelector("#refresh")?.addEventListener("click", () => void render());
+  main.querySelector("#clearJournal")?.addEventListener("click", () => {
+    const ok = window.confirm(
+      "Clear the entire trade journal?\n\nThis only clears learning notes / closed-trade history. Session Reset does NOT clear the journal.",
+    );
+    if (!ok) return;
+    void withBusy(async () => {
+      const r = await api.clearJournal();
+      message = r.message;
+    });
+  });
+  main.querySelectorAll("button.journal-row").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = (btn as HTMLButtonElement).dataset.jid ?? "";
+      const prev = (btn as HTMLButtonElement).dataset.note ?? "";
+      const next = window.prompt("Journal note (learning):", prev);
+      if (next == null) return;
+      void withBusy(async () => {
+        const r = await api.updateJournalNote(id, next);
+        message = r.ok ? "Note saved" : (r.message ?? "Failed to save note");
+      });
+    });
+  });
 }
 
 async function paintSettings(main: Element, base: string) {
