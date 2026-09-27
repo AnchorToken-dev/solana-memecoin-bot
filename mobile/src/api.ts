@@ -101,4 +101,51 @@ export const api = {
       portfolio: Record<string, unknown>;
       fills?: Array<Record<string, unknown>>;
     }>("/runner/exit", { method: "POST" }),
+  patchConfig: (body: Record<string, unknown>) =>
+    request<{
+      ok: boolean;
+      message: string;
+      config: Record<string, unknown>;
+      status: Record<string, unknown>;
+    }>("/config", { method: "PATCH", body: JSON.stringify(body) }),
+  applyPreset: (preset: "momentum" | "sniper") =>
+    request<{
+      ok: boolean;
+      message: string;
+      config: Record<string, unknown>;
+      status: Record<string, unknown>;
+    }>("/config/preset", {
+      method: "POST",
+      body: JSON.stringify({ preset }),
+    }),
+  journal: (limit = 50, offset = 0) =>
+    request<{
+      entries: Array<{
+        id: string;
+        timestamp: number;
+        openedAt: number;
+        mint: string;
+        symbol: string;
+        side: string;
+        sizeUsd: number;
+        entryPrice: number;
+        exitPrice: number;
+        pnlUsd: number;
+        pnlPct: number;
+        exitReason: string;
+        note: string;
+      }>;
+      total: number;
+      limit: number;
+      offset: number;
+    }>(`/journal?limit=${limit}&offset=${offset}`),
+  updateJournalNote: (id: string, note: string) =>
+    request<{ ok: boolean; entry: { id: string; note: string }; message?: string }>(
+      `/journal/${encodeURIComponent(id)}`,
+      { method: "PATCH", body: JSON.stringify({ note }) },
+    ),
+  clearJournal: () =>
+    request<{ ok: boolean; cleared: number; message: string }>("/journal", {
+      method: "DELETE",
+    }),
 };

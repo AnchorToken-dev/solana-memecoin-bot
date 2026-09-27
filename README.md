@@ -5,7 +5,7 @@ Style: **momentum** — buy short-window strength, manage with a **trailing take
 
 > **Not financial advice. No profit is promised.** Paper results do not predict live results. Memecoins can go to zero. This repo ships **dry-run by default** and does **not** require (or accept) live wallet private keys to run.
 
-The **engine stays on a laptop/server**. The optional **Android APK** is only a control UI (status, start/stop, PnL with exit-now/reset + live chart, trades, API URL). No private keys in the app.
+The **engine stays on a laptop/server**. The optional **Android APK** is only a control UI (status, start/stop, PnL with exit-now/reset + live chart, trades, **Settings** with Momentum/Sniper presets + paper knobs). No private keys in the app.
 
 ## Specs (locked defaults)
 
@@ -32,6 +32,29 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 | Market data | `mock` | `MARKET_DATA_SOURCE=mock\|dexscreener\|pumpfun` |
 | Config file | `config/default.json` | `CONFIG_FILE` (e.g. `config/pumpfun-preset.json`) |
 | Control API | `0.0.0.0:8787` | `API_HOST` / `API_PORT` |
+
+### Named presets (Momentum | Sniper)
+
+In-app / API presets for paper research. Apply via **Settings** tab or `POST /config/preset`. Requires the runner **stopped**. Values persist in `data/runtime-config.json` (overlay wins over file/env on restart).
+
+| Knob | Momentum (Pump.fun research) | Sniper |
+|------|------------------------------|--------|
+| `STOP_LOSS_PCT` | **10** | **8** |
+| `TAKE_PROFIT_PCT` | **25** | **15** |
+| `TRAIL_ACTIVATE_PCT` | **10** | **8** |
+| `TRAIL_DISTANCE_PCT` | **7** | **4** |
+| `MAX_HOLD_MINUTES` | **20** | **10** |
+| `POLL_INTERVAL_MS` | **15000** | **10000** |
+| `MOMENTUM_MIN_PCT` | **5** | **4** |
+| `VOLUME_SPIKE_MULT` | **2.0** | **1.5** |
+| `MIN_LIQUIDITY_USD` | **5000** | **2000** |
+| `MIN_VOLUME_24H_USD` | **8000** | **3000** |
+| `MIN_AGE_MINUTES` | **3** | **0** (newer coins OK) |
+| `BANKROLL_USD` | 20 | 20 |
+| `DAILY_LOSS_USD` | 5 | 5 |
+| `POSITION_SIZE_PCT` | 0.95 | 0.95 |
+
+Presets never change `PAPER_MODE`, `MARKET_DATA_SOURCE`, or ledger/wallet paths. PATCH `/config` rejects those live-dangerous fields.
 
 ### Strategy (readable for tweaking)
 
@@ -103,12 +126,17 @@ npm run api
 | POST | `/runner/stop` | Stop loop |
 | POST | `/runner/reset` | **PAPER_MODE only**: stop if running, rebuild ledger to `BANKROLL_USD`, clear `stopReason` / cycles, empty trades. Response includes `status` + `portfolio` |
 | GET | `/portfolio` | Bankroll / cash / equity / PnL / positions (`openPositions[].mint` + `.symbol` for chart URLs) |
-| GET | `/config` | Public config (no secrets) |
-| GET | `/trades?limit=50` | Recent fills |
+| GET | `/config` | Public config + `activePreset` + `availablePresets` (no secrets) |
+| PATCH / PUT | `/config` | **PAPER_MODE only**: update paper knobs (bankroll, stops, trail, TP, momentum filters, min age, max hold, daily loss, poll). Persists `data/runtime-config.json`. **409** if runner running — stop first. Rejects `paperMode` / wallet / live fields |
+| POST | `/config/preset` | Body `{ "preset": "momentum" \| "sniper" }` — apply named preset + persist. **409** if runner running |
+| GET | `/trades?limit=50` | Recent fills (session ledger; cleared by Reset) |
+| GET | `/journal?limit=&offset=` | **Trade journal** — closed paper trades newest first (survives Reset) |
+| PATCH | `/journal/:id` | Body `{ "note": "…" }` — edit learning note |
+| DELETE | `/journal` | Explicit journal clear only (Reset does **not** clear journal) |
 
 CORS is open for local mobile / LAN browsers. Writes that start trading refuse unless `PAPER_MODE=true`. Live trading stays stubbed.
 
-**After a `daily_loss_cap` stop:** calling Start alone leaves realized PnL in the ledger, so the runner exits again on the next cycle. Hit **Reset** on the Android **PnL** tab (confirm dialog) or `POST /runner/reset` first.
+**After a `daily_loss_cap` stop:** calling Start alone leaves realized PnL in the ledger, so the runner exits again on the next cycle. Hit **Reset** on the Android **PnL** tab (confirm dialog) or `POST /runner/reset` first. Reset clears the session ledger but **keeps** `data/journal.json` (learning history).
 
 Other scripts:
 
@@ -122,8 +150,9 @@ npm run build
 
 Ledger output (under `data/`):
 
-- `trades.json` — full fill records  
+- `trades.json` — full fill records (session; cleared by Reset)  
 - `trades.csv` — spreadsheet-friendly log  
+- `journal.json` — append-only closed-trade journal + notes (survives Reset)  
 - Cash / positions / PnL printed each exit and at shutdown  
 
 ## Android APK (Capacitor control UI)
@@ -141,7 +170,7 @@ Location: `mobile/` — Vite + Capacitor Android shell. **No wallet / no private
      find laptop IP (`ip -4 addr` or `hostname -I`)  
      then API URL `http://<laptop-lan-ip>:8787`  
      (allow port 8787 in the laptop firewall if needed)
-3. **Status** / **Run** / **PnL** / **Trades** tabs hit that API. **Start / Stop** on **Run**; **Exit now** / **Reset** on **PnL** (near equity / open position). Server must have `PAPER_MODE=true`. Reset clears the ledger and any `stopReason` (e.g. daily-loss lock). With an open position, **PnL** embeds a **DexScreener** live chart (`mint` from `/portfolio`); Pump.fun blocks iframes — use **Open on Pump.fun**. See `docs/pnl-chart.md`.
+3. **Status** / **Run** / **PnL** / **Trades** / **Settings** tabs hit that API. **Start / Stop** on **Run**; **Exit now** / **Reset** on **PnL**; **Momentum | Sniper** + editable paper knobs on **Settings** (stop runner before applying). Server must have `PAPER_MODE=true`. Reset clears the ledger and any `stopReason` (e.g. daily-loss lock). With an open position, **PnL** embeds a **DexScreener** live chart (`mint` from `/portfolio`); Pump.fun blocks iframes — use **Open on Pump.fun**. See `docs/pnl-chart.md`.
 
 ### Build a debug APK on Linux
 

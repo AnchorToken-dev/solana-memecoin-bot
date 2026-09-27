@@ -20,7 +20,7 @@ export function createControlApp(engine: BotEngine) {
     cors({
       // Local mobile / emulator / LAN browser UI
       origin: true,
-      methods: ["GET", "POST", "OPTIONS"],
+      methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     }),
   );
   app.use(express.json({ limit: "32kb" }));
@@ -41,6 +41,63 @@ export function createControlApp(engine: BotEngine) {
   app.get("/config", (_req, res) => {
     // Safe read — BotConfig has no private keys; do not echo process.env.
     res.json({ config: engine.getPublicConfig() });
+  });
+
+  /**
+   * PATCH (or PUT) paper-safe knobs. Persists to data/runtime-config.json.
+   * Rejects live-dangerous fields. Requires runner stopped.
+   */
+  const patchConfigHandler = (
+    req: express.Request,
+    res: express.Response,
+  ): void => {
+    if (!engine.cfg.paperMode) {
+      res.status(403).json({
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing config changes while live mode is configured (live is stubbed).",
+        status: engine.getStatus(),
+        config: engine.getPublicConfig(),
+      });
+      return;
+    }
+    const result = engine.patchConfig(req.body);
+    if (!result.ok) {
+      const status =
+        result.message.includes("Stop the paper runner") ? 409 : 400;
+      res.status(status).json(result);
+      return;
+    }
+    res.status(200).json(result);
+  };
+  app.patch("/config", patchConfigHandler);
+  app.put("/config", patchConfigHandler);
+
+  /**
+   * Apply named preset: { "preset": "momentum" | "sniper" }.
+   * Requires runner stopped; persists overlay.
+   */
+  app.post("/config/preset", (req, res) => {
+    if (!engine.cfg.paperMode) {
+      res.status(403).json({
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing preset while live mode is configured (live is stubbed).",
+        status: engine.getStatus(),
+        config: engine.getPublicConfig(),
+      });
+      return;
+    }
+    const body = req.body as { preset?: unknown } | null;
+    const preset = body && typeof body === "object" ? body.preset : undefined;
+    const result = engine.applyPreset(preset);
+    if (!result.ok) {
+      const status =
+        result.message.includes("Stop the paper runner") ? 409 : 400;
+      res.status(status).json(result);
+      return;
+    }
+    res.status(200).json(result);
   });
 
   app.get("/portfolio", async (_req, res) => {
@@ -143,6 +200,59 @@ export function createControlApp(engine: BotEngine) {
   };
   app.post("/runner/exit", exitHandler);
   app.post("/position/exit", exitHandler);
+
+  /**
+   * Paper trade journal (closed fills + notes). Survives /runner/reset.
+   * Newest first. Query: ?limit=&offset=
+   */
+  app.get("/journal", (req, res) => {
+    const limitRaw = Number(req.query.limit ?? 50);
+    const offsetRaw = Number(req.query.offset ?? 0);
+    const limit = Number.isFinite(limitRaw)
+      ? Math.min(Math.max(1, Math.floor(limitRaw)), 500)
+      : 50;
+    const offset = Number.isFinite(offsetRaw)
+      ? Math.max(0, Math.floor(offsetRaw))
+      : 0;
+    res.json(engine.getJournal({ limit, offset }));
+  });
+
+  /** Update free-text learning note on a journal entry. */
+  app.patch("/journal/:id", (req, res) => {
+    const id = String(req.params.id ?? "");
+    const body = req.body as { note?: unknown } | null;
+    const note =
+      body && typeof body === "object" && typeof body.note === "string"
+        ? body.note
+        : null;
+    if (note == null) {
+      res.status(400).json({ ok: false, message: 'Body must include string "note"' });
+      return;
+    }
+    const result = engine.updateJournalNote(id, note);
+    if (!result.ok) {
+      res.status(404).json(result);
+      return;
+    }
+    res.status(200).json(result);
+  });
+
+  /**
+   * Explicit journal clear only. Does NOT run on /runner/reset —
+   * learning history is kept across paper session resets.
+   */
+  app.delete("/journal", (_req, res) => {
+    if (!engine.cfg.paperMode) {
+      res.status(403).json({
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing journal clear while live mode is configured.",
+      });
+      return;
+    }
+    const result = engine.clearJournal();
+    res.status(200).json({ ...result, message: `Cleared ${result.cleared} journal entries` });
+  });
 
   app.use(
     (

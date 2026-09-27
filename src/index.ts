@@ -46,7 +46,10 @@ async function main(): Promise<void> {
   Reset:     POST http://127.0.0.1:${port}/runner/reset  (PAPER: clear ledger / daily-loss lock)
   Portfolio: http://127.0.0.1:${port}/portfolio
   Trades:    http://127.0.0.1:${port}/trades
+  Journal:   http://127.0.0.1:${port}/journal  (survives reset; PATCH /journal/:id note)
   Config:    http://127.0.0.1:${port}/config
+  Patch:     PATCH http://127.0.0.1:${port}/config  (paper knobs; stop runner first)
+  Preset:    POST  http://127.0.0.1:${port}/config/preset  { "preset": "momentum"|"sniper" }
 
 Phone: set API base URL in the app Settings.
   Emulator / USB: adb reverse tcp:${port} tcp:${port}  → http://127.0.0.1:${port}
