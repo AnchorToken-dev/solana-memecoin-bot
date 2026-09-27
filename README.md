@@ -15,24 +15,30 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 | Bankroll | `$20` | `BANKROLL_USD` |
 | Max open trades | `1` | `MAX_OPEN_TRADES` |
 | Hard stop | `10%` | `STOP_LOSS_PCT` |
+| Max hold (time stop) | `20` minutes | `MAX_HOLD_MINUTES` (0 = off) |
+| Daily loss cap | `$5` realized | `DAILY_LOSS_USD` (0 = off; stops runner) |
 | Position size | `95%` of cash | `POSITION_SIZE_PCT` |
 | Momentum window | `5` minutes | `MOMENTUM_WINDOW_MINUTES` |
 | Min window change | `+8%` | `MOMENTUM_MIN_PCT` |
 | Volume spike | `2.0×` avg | `VOLUME_SPIKE_MULT` |
 | Min liquidity | `$15,000` | `MIN_LIQUIDITY_USD` |
 | Min 24h volume | `$25,000` | `MIN_VOLUME_24H_USD` |
+| Min age | `3` minutes | `MIN_AGE_MINUTES` (when `createdAt` known; 0 = off) |
 | Trail activate | `+15%` from entry | `TRAIL_ACTIVATE_PCT` |
 | Trail distance | `5%` from HWM | `TRAIL_DISTANCE_PCT` |
 | Slippage (sim) | `50` bps | `SLIPPAGE_BPS` |
 | Fee (sim) | `30` bps | `FEE_BPS` |
 | Market data | `mock` | `MARKET_DATA_SOURCE=mock\|dexscreener\|pumpfun` |
+| Config file | `config/default.json` | `CONFIG_FILE` (e.g. `config/pumpfun-preset.json`) |
 | Control API | `0.0.0.0:8787` | `API_HOST` / `API_PORT` |
 
 ### Strategy (readable for tweaking)
 
-1. **Entry** — token passes liquidity + 24h volume floors, short-window `%` change ≥ `MOMENTUM_MIN_PCT`, and window volume ≥ `VOLUME_SPIKE_MULT ×` recent average. Strongest signal wins; only one open trade.
+1. **Entry** — skip too-new coins when `createdAt` is known (`MIN_AGE_MINUTES`); then liquidity + 24h volume floors, short-window `%` change ≥ `MOMENTUM_MIN_PCT`, and window volume ≥ `VOLUME_SPIKE_MULT ×` recent average. Skip/reject reasons are logged (`too_new`, `low_liquidity`, `no_momentum`, …). Strongest signal wins; only one open trade.
 2. **Hard stop** — if mark ≤ entry × `(1 - STOP_LOSS_PCT/100)`, sell.
-3. **Trailing TP** — after unrealized gain ≥ `TRAIL_ACTIVATE_PCT`, arm a trail; sell if mark ≤ high-water × `(1 - TRAIL_DISTANCE_PCT/100)`.
+3. **Time stop** — if held ≥ `MAX_HOLD_MINUTES`, sell (`time_stop`).
+4. **Trailing TP** — after unrealized gain ≥ `TRAIL_ACTIVATE_PCT`, arm a trail; sell if mark ≤ high-water × `(1 - TRAIL_DISTANCE_PCT/100)`.
+5. **Daily loss cap** — when session realized PnL ≤ `−DAILY_LOSS_USD`, the runner stops (no new paper entries).
 
 ## Quick start (paper mode, Linux)
 
@@ -56,13 +62,26 @@ Use public DexScreener data instead of the mock feed:
 MARKET_DATA_SOURCE=dexscreener MAX_CYCLES=5 npm start
 ```
 
-Paper-trade against **Pump.fun-style** listings (unofficial frontend API + DexScreener enrich/fallback). Fills stay simulated:
+Paper-trade against **Pump.fun-style** listings (unofficial frontend API + DexScreener enrich/fallback). Fills stay simulated.
+
+Looser paper preset (copy or point `CONFIG_FILE` at it):
 
 ```bash
-MARKET_DATA_SOURCE=pumpfun PAPER_MODE=true MAX_CYCLES=5 npm start
-# or with the control API:
-MARKET_DATA_SOURCE=pumpfun npm run api
+# Option A — preset file (recommended)
+cp config/pumpfun-preset.json config/default.json   # or:
+CONFIG_FILE=config/pumpfun-preset.json MARKET_DATA_SOURCE=pumpfun npm start
+
+# Option B — env (same numbers as the preset)
+MARKET_DATA_SOURCE=pumpfun PAPER_MODE=true \
+  MOMENTUM_MIN_PCT=5 MIN_LIQUIDITY_USD=5000 MIN_VOLUME_24H_USD=8000 \
+  MIN_AGE_MINUTES=3 TRAIL_ACTIVATE_PCT=10 TRAIL_DISTANCE_PCT=7 \
+  MAX_HOLD_MINUTES=20 DAILY_LOSS_USD=5 MAX_CYCLES=5 npm start
+
+# Control API:
+CONFIG_FILE=config/pumpfun-preset.json npm run api
 ```
+
+Preset values: `MIN_LIQUIDITY_USD=5000`, `MIN_VOLUME_24H_USD=8000`, `MOMENTUM_MIN_PCT=5`, `MIN_AGE_MINUTES=3`, `TRAIL_ACTIVATE_PCT=10`, `TRAIL_DISTANCE_PCT=7`, `MAX_HOLD_MINUTES=20`, `DAILY_LOSS_USD=5`.
 
 See [docs/pumpfun-market-data.md](docs/pumpfun-market-data.md) for exact URLs, field mapping, and rate-limit / fragility notes.
 
@@ -208,6 +227,7 @@ mobile/               # Capacitor Android control UI
 tests/*.test.ts
 docs/pumpfun-market-data.md
 config/default.json
+config/pumpfun-preset.json
 .env.example
 ```
 
@@ -242,7 +262,7 @@ Until that exists, `PAPER_MODE=true` is the only supported path. The APK must no
 
 ## Risk reminder
 
-`$20` bankroll, **one** position, **10%** hard stop still means you can lose a large share of the account on a single bad tape. Paper first. Tweak specs in `.env` / `config/default.json` — code is kept readable on purpose.
+`$20` bankroll, **one** position, **10%** hard stop, plus optional **time stop** / **daily loss cap**, still means you can lose a large share of the account on a single bad tape. Paper first. Tweak specs in `.env`, `config/default.json`, or `config/pumpfun-preset.json` — code is kept readable on purpose.
 
 ## License
 

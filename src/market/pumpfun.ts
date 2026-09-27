@@ -89,6 +89,15 @@ function num(v: unknown, fallback = 0): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** Normalize pump.fun / Dex created timestamps to epoch ms. */
+export function normalizeCreatedAtMs(raw: unknown): number | undefined {
+  const n = num(raw, 0);
+  if (!(n > 0)) return undefined;
+  // Seconds vs ms heuristic.
+  return n < 1e12 ? n * 1000 : n;
+}
+
+
 /** Price from USD mcap / circulating supply (raw total_supply ÷ 10^decimals). */
 export function priceFromPumpCoin(coin: PumpCoin): number {
   const decimals = coin.base_decimals ?? 6;
@@ -288,6 +297,7 @@ export class PumpFunMarketData {
     const liquidityUsd = liquidityFromPumpCoin(coin, solUsd);
     // List API has no volume windows — leave zeros until Dex enrich fills them.
     // volumeAvgUsd=1 avoids divide-by-zero in spike ratio if enrich misses.
+    const createdAt = normalizeCreatedAtMs(coin.created_timestamp);
     return {
       mint: coin.mint,
       symbol: coin.symbol ?? "???",
@@ -299,6 +309,7 @@ export class PumpFunMarketData {
       volume24hUsd: 0,
       liquidityUsd,
       timestamp: Date.now(),
+      ...(createdAt != null ? { createdAt } : {}),
     };
   }
 
@@ -436,6 +447,7 @@ export class PumpFunMarketData {
             liquidity?: { usd?: number };
             volume?: { h24?: number; m5?: number };
             priceChange?: { m5?: number };
+            pairCreatedAt?: number;
           }>;
         };
         for (const p of body.pairs ?? []) {
@@ -450,6 +462,7 @@ export class PumpFunMarketData {
           const vol24 = p.volume?.h24 ?? 0;
           this.priceCache.set(mint, price);
           this.recordPrice(mint, price);
+          const createdAt = normalizeCreatedAtMs(p.pairCreatedAt);
           byMint.set(mint, {
             mint,
             symbol: p.baseToken?.symbol ?? "???",
@@ -461,6 +474,7 @@ export class PumpFunMarketData {
             volume24hUsd: vol24,
             liquidityUsd: p.liquidity?.usd ?? 0,
             timestamp: Date.now(),
+            ...(createdAt != null ? { createdAt } : {}),
           });
           if (byMint.size >= limit) break;
         }

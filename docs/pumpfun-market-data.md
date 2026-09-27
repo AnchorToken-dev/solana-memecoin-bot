@@ -39,6 +39,7 @@ Suggested poll cadence: keep `POLL_INTERVAL_MS≥15000` to stay polite.
 | `liquidityUsd` | `(real_sol_reserves \|\| virtual_sol_reserves) / 1e9 × solPrice` |
 | `changeWindowPct` | DexScreener `priceChange.m5` when enrich works; else in-memory price ring over `MOMENTUM_WINDOW_MINUTES` |
 | `volumeWindowUsd` / `volume24hUsd` / `volumeAvgUsd` | DexScreener pair enrich (`volume.m5` / `h24`; avg ≈ h24/288). List API has **no** short-window volume. |
+| `createdAt` | `created_timestamp` (normalized to epoch ms); used by `MIN_AGE_MINUTES` age filter |
 
 ### Optional enrich — DexScreener (default on)
 
@@ -69,9 +70,14 @@ label this as **fallback, not Pump.fun frontend**. Disable with
 
 ```bash
 MARKET_DATA_SOURCE=pumpfun
+# or: CONFIG_FILE=config/pumpfun-preset.json
 # PUMPFUN_API_BASE=https://frontend-api-v3.pump.fun
 # PUMPFUN_DEXSCREENER_ENRICH=true
 # PUMPFUN_DEXSCREENER_FALLBACK=true
+# Looser paper gates (see config/pumpfun-preset.json):
+# MOMENTUM_MIN_PCT=5 MIN_LIQUIDITY_USD=5000 MIN_VOLUME_24H_USD=8000
+# MIN_AGE_MINUTES=3 TRAIL_ACTIVATE_PCT=10 TRAIL_DISTANCE_PCT=7
+# MAX_HOLD_MINUTES=20 DAILY_LOSS_USD=5
 ```
 
 ## Paper vs live

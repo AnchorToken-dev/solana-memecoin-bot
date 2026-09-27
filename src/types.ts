@@ -6,6 +6,11 @@ export interface MomentumParams {
   volumeSpikeMult: number;
   minLiquidityUsd: number;
   minVolume24hUsd: number;
+  /**
+   * Skip coins younger than this many minutes when `createdAt` is present
+   * on the snapshot (Pump.fun `created_timestamp`). 0 = disabled.
+   */
+  minAgeMinutes: number;
 }
 
 export interface TrailingTakeProfitParams {
@@ -37,6 +42,16 @@ export interface BotConfig {
   trailingTakeProfit: TrailingTakeProfitParams;
   paperBroker: PaperBrokerParams;
   runner: RunnerParams;
+  /**
+   * Hard time stop: exit an open paper position after this many minutes.
+   * 0 = disabled.
+   */
+  maxHoldMinutes: number;
+  /**
+   * Stop the runner when session realized PnL ≤ −this USD amount.
+   * 0 = disabled.
+   */
+  dailyLossUsd: number;
   marketDataSource: "mock" | "dexscreener" | "pumpfun";
   ledgerDir: string;
 }
@@ -53,12 +68,18 @@ export interface TokenSnapshot {
   volume24hUsd: number;
   liquidityUsd: number;
   timestamp: number;
+  /**
+   * Token / pair creation time in epoch ms, when known
+   * (Pump.fun `created_timestamp`, DexScreener `pairCreatedAt`).
+   */
+  createdAt?: number;
 }
 
 export type Side = "buy" | "sell";
 export type ExitReason =
   | "stop_loss"
   | "trailing_take_profit"
+  | "time_stop"
   | "manual"
   | "risk_flat";
 
@@ -105,4 +126,20 @@ export interface PortfolioSnapshot {
   realizedPnlUsd: number;
   unrealizedPnlUsd: number;
   tradeCount: number;
+}
+
+/** Why a scanned token was not taken as an entry. */
+export type EntryRejectReason =
+  | "already_open"
+  | "too_new"
+  | "low_liquidity"
+  | "low_volume_24h"
+  | "no_momentum"
+  | "no_volume_spike";
+
+export interface EntryReject {
+  mint: string;
+  symbol: string;
+  reason: EntryRejectReason;
+  detail: string;
 }

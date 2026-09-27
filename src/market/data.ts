@@ -77,6 +77,8 @@ export class MockMarketData implements MarketDataProvider {
         volume24hUsd: spiked ? 80_000 : 30_000,
         liquidityUsd: 40_000,
         timestamp: now,
+        // Mock tokens are "old enough" for MIN_AGE_MINUTES filters.
+        createdAt: now - 60 * 60_000,
       };
     });
   }

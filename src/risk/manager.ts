@@ -18,11 +18,21 @@ export interface SizeResult {
  *  - Never exceed MAX_OPEN_TRADES (default 1)
  *  - Size = cash * POSITION_SIZE_PCT (default 0.95)
  *  - Refuse zero/negative price
+ *  - Refuse new entries when session daily loss cap is hit
  */
 export function sizePosition(
   req: SizeRequest,
   cfg: BotConfig,
+  sessionRealizedPnlUsd = 0,
 ): SizeResult {
+  if (isDailyLossBreached(sessionRealizedPnlUsd, cfg.dailyLossUsd)) {
+    return {
+      ok: false,
+      notionalUsd: 0,
+      qty: 0,
+      reason: `daily loss cap hit (realized $${sessionRealizedPnlUsd.toFixed(2)} ≤ −$${cfg.dailyLossUsd})`,
+    };
+  }
   if (req.openCount >= cfg.maxOpenTrades) {
     return {
       ok: false,
@@ -77,4 +87,30 @@ export function canOpenAnother(
   cfg: BotConfig,
 ): boolean {
   return openCount < cfg.maxOpenTrades;
+}
+
+/**
+ * Session daily loss cap: stop when realized PnL ≤ −dailyLossUsd.
+ * dailyLossUsd = 0 disables the gate.
+ */
+export function isDailyLossBreached(
+  realizedPnlUsd: number,
+  dailyLossUsd: number,
+): boolean {
+  if (dailyLossUsd <= 0) return false;
+  return realizedPnlUsd <= -dailyLossUsd;
+}
+
+/**
+ * Hard time stop: position held longer than maxHoldMinutes.
+ * maxHoldMinutes = 0 disables.
+ */
+export function isMaxHoldExceeded(
+  position: Position,
+  nowMs: number,
+  maxHoldMinutes: number,
+): boolean {
+  if (maxHoldMinutes <= 0) return false;
+  const heldMs = nowMs - position.openedAt;
+  return heldMs >= maxHoldMinutes * 60_000;
 }

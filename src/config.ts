@@ -12,6 +12,7 @@ const MomentumSchema = z.object({
   volumeSpikeMult: z.number().positive(),
   minLiquidityUsd: z.number().nonnegative(),
   minVolume24hUsd: z.number().nonnegative(),
+  minAgeMinutes: z.number().nonnegative(),
 });
 
 const TrailSchema = z.object({
@@ -36,6 +37,8 @@ const ConfigSchema = z.object({
     scanLimit: z.number().int().positive(),
     maxCycles: z.number().int().nonnegative(),
   }),
+  maxHoldMinutes: z.number().nonnegative(),
+  dailyLossUsd: z.number().nonnegative(),
   marketDataSource: z.enum(["mock", "dexscreener", "pumpfun"]),
   ledgerDir: z.string().min(1),
 });
@@ -71,13 +74,21 @@ function envStr<T extends string>(
   return v as T;
 }
 
+/**
+ * Load JSON defaults. Prefer `CONFIG_FILE` (e.g. config/pumpfun-preset.json),
+ * else config/default.json.
+ */
 function loadFileDefaults(): Partial<BotConfig> {
-  const path = resolve(process.cwd(), "config/default.json");
+  const override = process.env.CONFIG_FILE?.trim();
+  const path = resolve(
+    process.cwd(),
+    override && override.length > 0 ? override : "config/default.json",
+  );
   if (!existsSync(path)) return {};
   return JSON.parse(readFileSync(path, "utf8")) as Partial<BotConfig>;
 }
 
-/** Merge config/default.json + env overrides. Env wins. */
+/** Merge config JSON + env overrides. Env wins. */
 export function loadConfig(): BotConfig {
   const file = loadFileDefaults();
 
@@ -105,6 +116,10 @@ export function loadConfig(): BotConfig {
         "MIN_VOLUME_24H_USD",
         file.momentum?.minVolume24hUsd ?? 25_000,
       ),
+      minAgeMinutes: envNum(
+        "MIN_AGE_MINUTES",
+        file.momentum?.minAgeMinutes ?? 3,
+      ),
     },
     trailingTakeProfit: {
       activatePct: envNum(
@@ -131,6 +146,11 @@ export function loadConfig(): BotConfig {
       scanLimit: envNum("SCAN_LIMIT", file.runner?.scanLimit ?? 20),
       maxCycles: envNum("MAX_CYCLES", file.runner?.maxCycles ?? 0),
     },
+    maxHoldMinutes: envNum(
+      "MAX_HOLD_MINUTES",
+      file.maxHoldMinutes ?? 20,
+    ),
+    dailyLossUsd: envNum("DAILY_LOSS_USD", file.dailyLossUsd ?? 5),
     marketDataSource: envStr(
       "MARKET_DATA_SOURCE",
       (file.marketDataSource as "mock" | "dexscreener" | "pumpfun") ?? "mock",
