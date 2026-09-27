@@ -84,4 +84,12 @@ export const api = {
       status: Record<string, unknown>;
       portfolio: Record<string, unknown>;
     }>("/runner/reset", { method: "POST" }),
+  exitNow: () =>
+    request<{
+      ok: boolean;
+      message: string;
+      status: Record<string, unknown>;
+      portfolio: Record<string, unknown>;
+      fills?: Array<Record<string, unknown>>;
+    }>("/runner/exit", { method: "POST" }),
 };

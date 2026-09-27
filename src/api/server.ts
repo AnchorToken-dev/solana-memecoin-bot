@@ -114,6 +114,35 @@ export function createControlApp(engine: BotEngine) {
     res.status(result.ok ? 200 : 403).json(result);
   });
 
+  /**
+   * Flatten the open paper position at current mark (reason=manual_exit).
+   * PAPER_MODE only. 400 when flat.
+   */
+  const exitHandler = async (
+    _req: express.Request,
+    res: express.Response,
+  ): Promise<void> => {
+    if (!engine.cfg.paperMode) {
+      const portfolio = await engine.getPortfolio();
+      res.status(403).json({
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing manual exit while live mode is configured (live is stubbed).",
+        status: engine.getStatus(),
+        portfolio,
+      });
+      return;
+    }
+    const result = await engine.exitNow();
+    if (!result.ok) {
+      res.status(400).json(result);
+      return;
+    }
+    res.status(200).json(result);
+  };
+  app.post("/runner/exit", exitHandler);
+  app.post("/position/exit", exitHandler);
+
   app.use(
     (
       err: unknown,

@@ -82,6 +82,22 @@ export function isStopLossHit(
   return markPrice <= stopPrice;
 }
 
+/**
+ * Hard take-profit: unrealized gain ≥ takeProfitPct from entry.
+ * takeProfitPct = 0 disables.
+ */
+export function isTakeProfitHit(
+  position: Position,
+  markPrice: number,
+  takeProfitPct: number,
+): boolean {
+  if (takeProfitPct <= 0) return false;
+  if (position.entryPrice <= 0) return false;
+  const gainPct =
+    ((markPrice - position.entryPrice) / position.entryPrice) * 100;
+  return gainPct >= takeProfitPct;
+}
+
 export function canOpenAnother(
   openCount: number,
   cfg: BotConfig,

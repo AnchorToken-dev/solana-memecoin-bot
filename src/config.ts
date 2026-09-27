@@ -25,6 +25,7 @@ const ConfigSchema = z.object({
   bankrollUsd: z.number().positive(),
   maxOpenTrades: z.number().int().positive(),
   stopLossPct: z.number().positive(),
+  takeProfitPct: z.number().nonnegative(),
   positionSizePct: z.number().gt(0).lte(1),
   momentum: MomentumSchema,
   trailingTakeProfit: TrailSchema,
@@ -97,6 +98,7 @@ export function loadConfig(): BotConfig {
     bankrollUsd: envNum("BANKROLL_USD", file.bankrollUsd ?? 20),
     maxOpenTrades: envNum("MAX_OPEN_TRADES", file.maxOpenTrades ?? 1),
     stopLossPct: envNum("STOP_LOSS_PCT", file.stopLossPct ?? 10),
+    takeProfitPct: envNum("TAKE_PROFIT_PCT", file.takeProfitPct ?? 25),
     positionSizePct: envNum("POSITION_SIZE_PCT", file.positionSizePct ?? 0.95),
     momentum: {
       minPct: envNum("MOMENTUM_MIN_PCT", file.momentum?.minPct ?? 8),

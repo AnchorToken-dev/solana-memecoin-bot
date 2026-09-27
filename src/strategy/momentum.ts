@@ -6,7 +6,7 @@ import type {
   Position,
   TokenSnapshot,
 } from "../types.js";
-import { isMaxHoldExceeded } from "../risk/manager.js";
+import { isMaxHoldExceeded, isTakeProfitHit } from "../risk/manager.js";
 
 export interface EntrySignal {
   mint: string;
@@ -140,8 +140,10 @@ export function evaluateEntries(
 }
 
 /**
- * Update high-water / trail arming, then decide stop, time-stop, or trailing TP.
+ * Update high-water / trail arming, then decide stop, hard TP, time-stop, or trailing TP.
  *
+ * Hard take-profit (defaults):
+ *   - TAKE_PROFIT_PCT = 25  (exit when unrealized ≥ +25%; 0 disables)
  * Trailing TP (defaults):
  *   - TRAIL_ACTIVATE_PCT = 15  (arm after +15% from entry)
  *   - TRAIL_DISTANCE_PCT = 5   (exit if price falls 5% from HWM once armed)
@@ -178,6 +180,18 @@ export function evaluateExit(
       exit: {
         positionId: updated.id,
         reason: "stop_loss",
+        markPrice,
+      },
+    };
+  }
+
+  // Hard take-profit (fixed % gain). 0 disables.
+  if (isTakeProfitHit(updated, markPrice, cfg.takeProfitPct)) {
+    return {
+      position: updated,
+      exit: {
+        positionId: updated.id,
+        reason: "take_profit",
         markPrice,
       },
     };

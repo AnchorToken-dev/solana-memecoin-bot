@@ -2,7 +2,7 @@
  * Controllable paper bot engine — start/stop from CLI or HTTP control API.
  * Live trading remains stubbed; start() refuses unless PAPER_MODE=true.
  */
-import type { BotConfig, PortfolioSnapshot, TokenSnapshot, TradeRecord } from "../types.js";
+import type { BotConfig, Fill, PortfolioSnapshot, TokenSnapshot, TradeRecord } from "../types.js";
 import type { MarketDataProvider } from "../market/data.js";
 import { createMarketData } from "../market/data.js";
 import { PaperBroker } from "../broker/paper.js";
@@ -258,6 +258,91 @@ export class BotEngine {
     };
   }
 
+  /**
+   * PAPER_MODE only: flatten the open paper position(s) at the current mark
+   * via the paper broker. Reason = manual_exit. Does not stop the runner.
+   */
+  async exitNow(): Promise<{
+    ok: boolean;
+    message: string;
+    status: EngineStatus;
+    portfolio: PortfolioSnapshot;
+    fills?: Fill[];
+  }> {
+    if (!this.cfg.paperMode) {
+      const portfolio = await this.getPortfolio();
+      return {
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing manual exit while live mode is configured (live is stubbed).",
+        status: this.getStatus(),
+        portfolio,
+      };
+    }
+
+    const open = this.ledger.openPositions;
+    if (open.length === 0) {
+      const portfolio = await this.getPortfolio();
+      return {
+        ok: false,
+        message: "No open paper position to exit",
+        status: this.getStatus(),
+        portfolio,
+      };
+    }
+
+    const fills: Fill[] = [];
+    for (const pos of open) {
+      // Re-check: a concurrent tick may have already closed it.
+      if (!this.ledger.openPositions.some((p) => p.id === pos.id)) {
+        continue;
+      }
+      const mark = await this.market.getPrice(pos.mint);
+      if (mark == null || !(mark > 0)) {
+        const portfolio = await this.getPortfolio();
+        return {
+          ok: false,
+          message: `No mark price for ${pos.symbol} (${pos.mint}); cannot exit`,
+          status: this.getStatus(),
+          portfolio,
+        };
+      }
+      const { fill, proceedsUsd, realizedPnlUsd } = this.broker.applySell({
+        position: pos,
+        markPrice: mark,
+        reason: "manual_exit",
+      });
+      this.ledger.recordSell(fill, realizedPnlUsd, proceedsUsd);
+      fills.push(fill);
+      log.info("Manual paper exit", {
+        symbol: pos.symbol,
+        mark,
+        realizedPnlUsd,
+        proceedsUsd,
+      });
+    }
+
+    if (fills.length === 0) {
+      const portfolio = await this.getPortfolio();
+      return {
+        ok: false,
+        message: "No open paper position to exit",
+        status: this.getStatus(),
+        portfolio,
+      };
+    }
+
+    const portfolio = await this.getPortfolio();
+    const syms = fills.map((f) => f.symbol).join(", ");
+    return {
+      ok: true,
+      message: `Manual exit filled for ${syms}`,
+      status: this.getStatus(),
+      portfolio,
+      fills,
+    };
+  }
+
   private async runLoop(signal: AbortSignal): Promise<void> {
     const { cfg, market, ledger } = this;
     log.info("Runner loop starting", {
@@ -267,6 +352,7 @@ export class BotEngine {
       source: cfg.marketDataSource,
       maxHoldMinutes: cfg.maxHoldMinutes,
       dailyLossUsd: cfg.dailyLossUsd,
+      takeProfitPct: cfg.takeProfitPct,
     });
 
     while (!signal.aborted) {
@@ -329,9 +415,16 @@ export class BotEngine {
         log.warn(`No mark for ${pos.symbol}; skipping exit check`);
         continue;
       }
+      // Skip if a concurrent manual exit already closed this position.
+      if (!ledger.openPositions.some((p) => p.id === pos.id)) {
+        continue;
+      }
       const { position: updated, exit } = evaluateExit(pos, mark, cfg, now);
       ledger.replacePosition(updated);
       if (exit) {
+        if (!ledger.openPositions.some((p) => p.id === updated.id)) {
+          continue;
+        }
         const { fill, proceedsUsd, realizedPnlUsd } = broker.applySell({
           position: updated,
           markPrice: exit.markPrice,

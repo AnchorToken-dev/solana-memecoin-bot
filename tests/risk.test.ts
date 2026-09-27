@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   sizePosition,
   isStopLossHit,
+  isTakeProfitHit,
   canOpenAnother,
   isDailyLossBreached,
   isMaxHoldExceeded,
@@ -16,6 +17,7 @@ function baseCfg(over: Partial<BotConfig> = {}): BotConfig {
     bankrollUsd: 20,
     maxOpenTrades: 1,
     stopLossPct: 10,
+    takeProfitPct: 25,
     positionSizePct: 0.95,
     momentum: {
       minPct: 8,
@@ -117,6 +119,42 @@ describe("risk: hard stop at -10%", () => {
     const p = pos(1.0);
     const { exit } = evaluateExit(p, 0.95, cfg);
     assert.equal(exit, null);
+  });
+});
+
+
+describe("risk: hard take-profit (TAKE_PROFIT_PCT)", () => {
+  it("isTakeProfitHit fires at exactly +25%", () => {
+    const p = pos(1.0);
+    assert.equal(isTakeProfitHit(p, 1.249, 25), false);
+    assert.equal(isTakeProfitHit(p, 1.25, 25), true);
+    assert.equal(isTakeProfitHit(p, 1.5, 25), true);
+    assert.equal(isTakeProfitHit(p, 2.0, 0), false);
+  });
+
+  it("evaluateExit returns take_profit when unrealized >= TAKE_PROFIT_PCT", () => {
+    const cfg = baseCfg({ takeProfitPct: 25 });
+    const p = pos(1.0);
+    const { exit } = evaluateExit(p, 1.25, cfg);
+    assert.ok(exit);
+    assert.equal(exit!.reason, "take_profit");
+  });
+
+  it("does not take-profit below the threshold (trail may arm)", () => {
+    const cfg = baseCfg({ takeProfitPct: 25 });
+    const p = pos(1.0);
+    // +20% — below hard TP 25, above trail activate 15 → arm trail, no exit
+    const { exit, position } = evaluateExit(p, 1.2, cfg);
+    assert.equal(exit, null);
+    assert.equal(position.trailArmed, true);
+  });
+
+  it("takeProfitPct=0 disables hard take-profit", () => {
+    const cfg = baseCfg({ takeProfitPct: 0 });
+    const p = pos(1.0);
+    const { exit, position } = evaluateExit(p, 1.5, cfg);
+    assert.equal(exit, null);
+    assert.equal(position.trailArmed, true);
   });
 });
 

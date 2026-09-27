@@ -5,7 +5,7 @@ Style: **momentum** — buy short-window strength, manage with a **trailing take
 
 > **Not financial advice. No profit is promised.** Paper results do not predict live results. Memecoins can go to zero. This repo ships **dry-run by default** and does **not** require (or accept) live wallet private keys to run.
 
-The **engine stays on a laptop/server**. The optional **Android APK** is only a control UI (status, start/stop paper runner, bankroll/PnL, trades, API URL). No private keys in the app.
+The **engine stays on a laptop/server**. The optional **Android APK** is only a control UI (status, start/stop/reset/exit-now paper runner, bankroll/PnL, trades, API URL). No private keys in the app.
 
 ## Specs (locked defaults)
 
@@ -15,6 +15,7 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 | Bankroll | `$20` | `BANKROLL_USD` |
 | Max open trades | `1` | `MAX_OPEN_TRADES` |
 | Hard stop | `10%` | `STOP_LOSS_PCT` |
+| Hard take-profit | `+25%` from entry | `TAKE_PROFIT_PCT` (0 = off) |
 | Max hold (time stop) | `20` minutes | `MAX_HOLD_MINUTES` (0 = off) |
 | Daily loss cap | `$5` realized | `DAILY_LOSS_USD` (0 = off; stops runner) |
 | Position size | `95%` of cash | `POSITION_SIZE_PCT` |
@@ -35,10 +36,12 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 ### Strategy (readable for tweaking)
 
 1. **Entry** — skip too-new coins when `createdAt` is known (`MIN_AGE_MINUTES`); then liquidity + 24h volume floors, short-window `%` change ≥ `MOMENTUM_MIN_PCT`, and window volume ≥ `VOLUME_SPIKE_MULT ×` recent average. Skip/reject reasons are logged (`too_new`, `low_liquidity`, `no_momentum`, …). Strongest signal wins; only one open trade.
-2. **Hard stop** — if mark ≤ entry × `(1 - STOP_LOSS_PCT/100)`, sell.
-3. **Time stop** — if held ≥ `MAX_HOLD_MINUTES`, sell (`time_stop`).
-4. **Trailing TP** — after unrealized gain ≥ `TRAIL_ACTIVATE_PCT`, arm a trail; sell if mark ≤ high-water × `(1 - TRAIL_DISTANCE_PCT/100)`.
-5. **Daily loss cap** — when session realized PnL ≤ `−DAILY_LOSS_USD`, the runner stops (no new paper entries). **Start does not clear the ledger** — use `POST /runner/reset` (or Start with `?reset=1`) / the app **Reset** button to restore `BANKROLL_USD` cash and unlock another session.
+2. **Hard stop** — if mark ≤ entry × `(1 - STOP_LOSS_PCT/100)`, sell (`stop_loss`).
+3. **Hard take-profit** — if unrealized gain ≥ `TAKE_PROFIT_PCT` (default `25`), sell (`take_profit`). `0` disables. Works alongside the trailing TP.
+4. **Time stop** — if held ≥ `MAX_HOLD_MINUTES`, sell (`time_stop`).
+5. **Trailing TP** — after unrealized gain ≥ `TRAIL_ACTIVATE_PCT`, arm a trail; sell if mark ≤ high-water × `(1 - TRAIL_DISTANCE_PCT/100)` (`trailing_take_profit`).
+6. **Manual exit** — `POST /runner/exit` (or `/position/exit`) / app **Exit now** flattens the open paper position at the current mark (`manual_exit`).
+7. **Daily loss cap** — when session realized PnL ≤ `−DAILY_LOSS_USD`, the runner stops (no new paper entries). **Start does not clear the ledger** — use `POST /runner/reset` (or Start with `?reset=1`) / the app **Reset** button to restore `BANKROLL_USD` cash and unlock another session.
 
 ## Quick start (paper mode, Linux)
 
@@ -265,7 +268,7 @@ Until that exists, `PAPER_MODE=true` is the only supported path. The APK must no
 
 ## Risk reminder
 
-`$20` bankroll, **one** position, **10%** hard stop, plus optional **time stop** / **daily loss cap**, still means you can lose a large share of the account on a single bad tape. Paper first. Tweak specs in `.env`, `config/default.json`, or `config/pumpfun-preset.json` — code is kept readable on purpose.
+`$20` bankroll, **one** position, **10%** hard stop, **+25%** hard take-profit (optional), plus optional **time stop** / **daily loss cap**, still means you can lose a large share of the account on a single bad tape. Paper first. Tweak specs in `.env`, `config/default.json`, or `config/pumpfun-preset.json` — code is kept readable on purpose.
 
 ## License
 
