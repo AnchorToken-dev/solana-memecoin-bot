@@ -258,13 +258,12 @@ function matchesPreset(
   cfg: BotConfig,
   knobs: (typeof PRESETS)[PresetName],
 ): boolean {
+  // Strategy knobs only — bankroll / daily loss are session risk and sticky.
   return (
-    cfg.bankrollUsd === knobs.bankrollUsd &&
     cfg.stopLossPct === knobs.stopLossPct &&
     cfg.takeProfitPct === knobs.takeProfitPct &&
     cfg.positionSizePct === knobs.positionSizePct &&
     cfg.maxHoldMinutes === knobs.maxHoldMinutes &&
-    cfg.dailyLossUsd === knobs.dailyLossUsd &&
     cfg.runner.pollIntervalMs === knobs.runner.pollIntervalMs &&
     cfg.momentum.minPct === knobs.momentum.minPct &&
     cfg.momentum.windowMinutes === knobs.momentum.windowMinutes &&

@@ -245,10 +245,15 @@ export class BotEngine {
     }
     applyPresetKnobs(this.cfg, preset);
     const path = this.persistRuntimeConfig();
-    log.info("Paper preset applied + persisted", { preset, path });
+    log.info("Paper preset applied + persisted", {
+      preset,
+      path,
+      bankrollUsd: this.cfg.bankrollUsd,
+      dailyLossUsd: this.cfg.dailyLossUsd,
+    });
     return {
       ok: true,
-      message: `Preset "${preset}" applied and saved to ${path}`,
+      message: `Preset "${preset}" applied and saved to ${path} (bankroll $${this.cfg.bankrollUsd} / daily loss $${this.cfg.dailyLossUsd} kept sticky)`,
       status: this.getStatus(),
       config: this.getPublicConfig(),
     };

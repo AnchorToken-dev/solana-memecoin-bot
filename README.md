@@ -35,6 +35,9 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 
 ### Named presets (Momentum | Sniper)
 
+**Session risk is sticky:** applying Momentum or Sniper changes strategy knobs (stops, trail, TP, poll, liq/vol, min age, hold) but **preserves** current `bankrollUsd` and `dailyLossUsd` (e.g. Mark’s $100 / $25). Edit those via PATCH `/config` or Settings Save.
+
+
 In-app / API presets for paper research. Apply via **Settings** tab or `POST /config/preset`. Requires the runner **stopped**. Values persist in `data/runtime-config.json` (overlay wins over file/env on restart).
 
 | Knob | Momentum (Pump.fun research) | Sniper |
