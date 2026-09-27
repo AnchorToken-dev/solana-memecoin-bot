@@ -27,6 +27,11 @@ import {
   type PresetName,
 } from "../presets.js";
 import { TradeJournal, type JournalEntry } from "../journal/journal.js";
+import {
+  SessionEventBus,
+  exitEventType,
+  exitTitle,
+} from "../alerts/sessionEvents.js";
 
 export type RunnerState = "stopped" | "starting" | "running" | "stopping";
 
@@ -80,6 +85,7 @@ export class BotEngine {
   readonly broker: PaperBroker;
   readonly ledger: PaperLedger;
   readonly journal: TradeJournal;
+  readonly events: SessionEventBus;
 
   private state: RunnerState = "stopped";
   private cycle = 0;
@@ -101,6 +107,7 @@ export class BotEngine {
       broker?: PaperBroker;
       ledger?: PaperLedger;
       journal?: TradeJournal;
+      events?: SessionEventBus;
       /** Absolute or relative path for runtime-config.json persistence. */
       runtimeConfigPath?: string;
     },
@@ -112,6 +119,7 @@ export class BotEngine {
       deps?.ledger ?? new PaperLedger(cfg.bankrollUsd, cfg.ledgerDir);
     this.journal =
       deps?.journal ?? new TradeJournal(cfg.ledgerDir);
+    this.events = deps?.events ?? new SessionEventBus();
     this.runtimeConfigPath = deps?.runtimeConfigPath;
   }
 
@@ -284,13 +292,17 @@ export class BotEngine {
     return this.journal.clear();
   }
 
+  getAlerts(sinceMs = 0, limit = 50) {
+    return { events: this.events.since(sinceMs, limit) };
+  }
+
   /** Record a closed paper trade into the learning journal (survives session reset). */
   private recordJournalClose(
     position: Position,
     fill: Fill,
     realizedPnlUsd: number,
   ): JournalEntry {
-    return this.journal.appendClose({
+    const entry = this.journal.appendClose({
       position,
       exitPrice: fill.price,
       pnlUsd: realizedPnlUsd,
@@ -298,6 +310,23 @@ export class BotEngine {
       fillId: fill.id,
       timestamp: fill.timestamp,
     });
+    const reason = fill.reason ?? "unknown";
+    const pnlSign = realizedPnlUsd >= 0 ? "+" : "";
+    const body = `${position.symbol}: ${pnlSign}$${realizedPnlUsd.toFixed(2)} (${pnlSign}${entry.pnlPct.toFixed(1)}%) · ${reason}`;
+    // One notification per close: typed exit + PnL in body.
+    this.events.push(
+      exitEventType(reason),
+      exitTitle(reason),
+      body,
+      {
+        symbol: position.symbol,
+        mint: position.mint,
+        pnlUsd: realizedPnlUsd,
+        reason,
+        closed: true,
+      },
+    );
+    return entry;
   }
 
   /**
@@ -352,6 +381,12 @@ export class BotEngine {
     });
 
     log.info("Paper runner started via engine");
+    this.events.push(
+      "bot_started",
+      "Paper bot started",
+      `Runner running · bankroll $${this.cfg.bankrollUsd.toFixed(2)}`,
+      { bankrollUsd: this.cfg.bankrollUsd },
+    );
     return {
       ok: true,
       message: "Paper runner started",
@@ -374,6 +409,21 @@ export class BotEngine {
       await this.loopPromise.catch(() => undefined);
     }
     log.info("Paper runner stopped via engine");
+    const reason = this.stopReason ?? "manual_stop";
+    if (String(reason).startsWith("daily_loss_cap")) {
+      this.events.push(
+        "daily_loss_cap",
+        "Daily loss cap hit",
+        reason,
+        { stopReason: reason },
+      );
+    }
+    this.events.push(
+      "bot_stopped",
+      "Paper bot stopped",
+      reason,
+      { stopReason: reason },
+    );
     return {
       ok: true,
       message: "Paper runner stopped",
@@ -572,6 +622,29 @@ export class BotEngine {
     }
     const snap = ledger.snapshot(marks);
     log.info("Runner loop ended; portfolio", snap);
+    const reason = this.stopReason;
+    if (reason && String(reason).startsWith("daily_loss_cap")) {
+      this.events.push(
+        "daily_loss_cap",
+        "Daily loss cap hit",
+        reason,
+        { stopReason: reason, realizedPnlUsd: snap.realizedPnlUsd },
+      );
+      this.events.push(
+        "bot_stopped",
+        "Paper bot stopped",
+        reason,
+        { stopReason: reason },
+      );
+    } else if (reason && reason !== "manual_stop") {
+      // maxCycles / other auto-stops
+      this.events.push(
+        "bot_stopped",
+        "Paper bot stopped",
+        reason,
+        { stopReason: reason },
+      );
+    }
   }
 
   /** @returns true if the runner should halt (daily loss). */
@@ -663,6 +736,17 @@ export class BotEngine {
     });
     ledger.recordBuy(fill, position);
     log.info(`Entry signal: ${entry.reason}`);
+    this.events.push(
+      "position_opened",
+      "Position opened",
+      `${position.symbol} · $${fill.notionalUsd.toFixed(2)} @ ${fill.price}`,
+      {
+        symbol: position.symbol,
+        mint: position.mint,
+        sizeUsd: fill.notionalUsd,
+        entryPrice: fill.price,
+      },
+    );
     return false;
   }
 }

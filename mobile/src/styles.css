@@ -193,3 +193,11 @@ input[type="number"] {
 .journal-note { margin-top: 6px; font-size: 0.85rem; }
 .pnl-pos { color: var(--accent); font-weight: 700; }
 .pnl-neg { color: var(--danger); font-weight: 700; }
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+.toggle input { width: 18px; height: 18px; }

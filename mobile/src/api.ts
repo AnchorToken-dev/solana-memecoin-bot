@@ -148,4 +148,15 @@ export const api = {
     request<{ ok: boolean; cleared: number; message: string }>("/journal", {
       method: "DELETE",
     }),
+  alerts: (since = 0, limit = 50) =>
+    request<{
+      events: Array<{
+        id: string;
+        type: string;
+        title: string;
+        body: string;
+        timestamp: number;
+        meta?: Record<string, unknown>;
+      }>;
+    }>(`/alerts?since=${since}&limit=${limit}`),
 };
