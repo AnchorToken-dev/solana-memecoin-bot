@@ -133,8 +133,11 @@ export class BotEngine {
   /**
    * Start the paper runner loop. Only allowed when PAPER_MODE=true.
    * Idempotent if already running.
+   * Pass `{ reset: true }` to clear the paper ledger / daily-loss lock first.
    */
-  async start(): Promise<{ ok: boolean; message: string; status: EngineStatus }> {
+  async start(opts?: {
+    reset?: boolean;
+  }): Promise<{ ok: boolean; message: string; status: EngineStatus }> {
     if (!this.cfg.paperMode) {
       return {
         ok: false,
@@ -142,6 +145,16 @@ export class BotEngine {
           "Refusing to start: PAPER_MODE is false. Live trading is stubbed; keep PAPER_MODE=true.",
         status: this.getStatus(),
       };
+    }
+    if (opts?.reset) {
+      const cleared = await this.reset();
+      if (!cleared.ok) {
+        return {
+          ok: false,
+          message: cleared.message,
+          status: cleared.status,
+        };
+      }
     }
     if (this.state === "running" || this.state === "starting") {
       return {
@@ -195,6 +208,53 @@ export class BotEngine {
       ok: true,
       message: "Paper runner stopped",
       status: this.getStatus(),
+    };
+  }
+
+  /**
+   * PAPER_MODE only: stop the runner if needed, rebuild the paper ledger to
+   * BANKROLL_USD cash (flat, zero realized PnL, empty trades on disk), clear
+   * stopReason / cycle counters. Unlocks start after a daily_loss_cap halt.
+   */
+  async reset(): Promise<{
+    ok: boolean;
+    message: string;
+    status: EngineStatus;
+    portfolio: PortfolioSnapshot;
+  }> {
+    if (!this.cfg.paperMode) {
+      const portfolio = await this.getPortfolio();
+      return {
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing reset while live mode is configured (live is stubbed).",
+        status: this.getStatus(),
+        portfolio,
+      };
+    }
+
+    if (this.state !== "stopped") {
+      await this.stop();
+    }
+
+    this.ledger.resetSession(this.cfg.bankrollUsd);
+    this.cycle = 0;
+    this.startedAt = null;
+    this.stoppedAt = null;
+    this.lastError = null;
+    this.lastCycleAt = null;
+    this.stopReason = null;
+
+    const portfolio = await this.getPortfolio();
+    log.info("Paper session reset", {
+      cashUsd: portfolio.cashUsd,
+      tradeCount: portfolio.tradeCount,
+    });
+    return {
+      ok: true,
+      message: `Paper session reset to $${this.cfg.bankrollUsd.toFixed(2)} bankroll`,
+      status: this.getStatus(),
+      portfolio,
     };
   }
 

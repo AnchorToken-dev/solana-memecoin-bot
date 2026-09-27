@@ -41,8 +41,9 @@ async function main(): Promise<void> {
     console.log(`Control API ready.
   Health:    http://127.0.0.1:${port}/health
   Status:    http://127.0.0.1:${port}/status
-  Start:     POST http://127.0.0.1:${port}/runner/start
+  Start:     POST http://127.0.0.1:${port}/runner/start  (?reset=1 clears ledger first)
   Stop:      POST http://127.0.0.1:${port}/runner/stop
+  Reset:     POST http://127.0.0.1:${port}/runner/reset  (PAPER: clear ledger / daily-loss lock)
   Portfolio: http://127.0.0.1:${port}/portfolio
   Trades:    http://127.0.0.1:${port}/trades
   Config:    http://127.0.0.1:${port}/config

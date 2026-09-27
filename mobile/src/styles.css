@@ -100,3 +100,5 @@ label { display: block; color: var(--muted); font-size: 0.85rem; margin-bottom: 
 .trade:first-of-type { border-top: 0; }
 .muted { color: var(--muted); font-size: 0.8rem; }
 .hidden { display: none !important; }
+
+.warn-text { color: var(--warn); font-weight: 600; max-width: 60%; text-align: right; word-break: break-word; }
