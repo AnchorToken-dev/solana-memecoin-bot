@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.env
+.env.local
+data/ledger.json
+data/trades.csv
+data/trades.json
+*.log
+.DS_Store
+coverage/
+.idea/
+.vscode/
+*.pem
+*.key
+id.json
+keypair*.json
+wallet*.json
