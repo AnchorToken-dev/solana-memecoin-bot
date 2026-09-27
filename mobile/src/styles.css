@@ -170,3 +170,26 @@ input[type="number"] {
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
+
+.journal-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: #0f172a;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  color: var(--text);
+  cursor: pointer;
+}
+.journal-row:active { border-color: #3b82f6; }
+.journal-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.journal-note { margin-top: 6px; font-size: 0.85rem; }
+.pnl-pos { color: var(--accent); font-weight: 700; }
+.pnl-neg { color: var(--danger); font-weight: 700; }

@@ -2,7 +2,7 @@
  * Controllable paper bot engine — start/stop from CLI or HTTP control API.
  * Live trading remains stubbed; start() refuses unless PAPER_MODE=true.
  */
-import type { BotConfig, Fill, PortfolioSnapshot, TokenSnapshot, TradeRecord } from "../types.js";
+import type { BotConfig, Fill, PortfolioSnapshot, Position, TokenSnapshot, TradeRecord } from "../types.js";
 import type { MarketDataProvider } from "../market/data.js";
 import { createMarketData } from "../market/data.js";
 import { PaperBroker } from "../broker/paper.js";
@@ -26,6 +26,7 @@ import {
   PRESET_NAMES,
   type PresetName,
 } from "../presets.js";
+import { TradeJournal, type JournalEntry } from "../journal/journal.js";
 
 export type RunnerState = "stopped" | "starting" | "running" | "stopping";
 
@@ -78,6 +79,7 @@ export class BotEngine {
   readonly market: MarketDataProvider;
   readonly broker: PaperBroker;
   readonly ledger: PaperLedger;
+  readonly journal: TradeJournal;
 
   private state: RunnerState = "stopped";
   private cycle = 0;
@@ -98,6 +100,7 @@ export class BotEngine {
       market?: MarketDataProvider;
       broker?: PaperBroker;
       ledger?: PaperLedger;
+      journal?: TradeJournal;
       /** Absolute or relative path for runtime-config.json persistence. */
       runtimeConfigPath?: string;
     },
@@ -107,6 +110,8 @@ export class BotEngine {
     this.broker = deps?.broker ?? new PaperBroker(cfg);
     this.ledger =
       deps?.ledger ?? new PaperLedger(cfg.bankrollUsd, cfg.ledgerDir);
+    this.journal =
+      deps?.journal ?? new TradeJournal(cfg.ledgerDir);
     this.runtimeConfigPath = deps?.runtimeConfigPath;
   }
 
@@ -260,6 +265,34 @@ export class BotEngine {
 
   getTrades(limit = 50): TradeRecord[] {
     return this.ledger.getTrades(limit);
+  }
+
+  getJournal(opts?: { limit?: number; offset?: number }) {
+    return this.journal.list(opts);
+  }
+
+  updateJournalNote(id: string, note: string) {
+    return this.journal.updateNote(id, note);
+  }
+
+  clearJournal() {
+    return this.journal.clear();
+  }
+
+  /** Record a closed paper trade into the learning journal (survives session reset). */
+  private recordJournalClose(
+    position: Position,
+    fill: Fill,
+    realizedPnlUsd: number,
+  ): JournalEntry {
+    return this.journal.appendClose({
+      position,
+      exitPrice: fill.price,
+      pnlUsd: realizedPnlUsd,
+      exitReason: fill.reason ?? "unknown",
+      fillId: fill.id,
+      timestamp: fill.timestamp,
+    });
   }
 
   /**
@@ -445,6 +478,7 @@ export class BotEngine {
         reason: "manual_exit",
       });
       this.ledger.recordSell(fill, realizedPnlUsd, proceedsUsd);
+      this.recordJournalClose(pos, fill, realizedPnlUsd);
       fills.push(fill);
       log.info("Manual paper exit", {
         symbol: pos.symbol,
@@ -563,6 +597,7 @@ export class BotEngine {
           reason: exit.reason,
         });
         ledger.recordSell(fill, realizedPnlUsd, proceedsUsd);
+        this.recordJournalClose(updated, fill, realizedPnlUsd);
       }
     }
 

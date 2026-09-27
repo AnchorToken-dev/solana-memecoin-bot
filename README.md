@@ -129,11 +129,14 @@ npm run api
 | GET | `/config` | Public config + `activePreset` + `availablePresets` (no secrets) |
 | PATCH / PUT | `/config` | **PAPER_MODE only**: update paper knobs (bankroll, stops, trail, TP, momentum filters, min age, max hold, daily loss, poll). Persists `data/runtime-config.json`. **409** if runner running — stop first. Rejects `paperMode` / wallet / live fields |
 | POST | `/config/preset` | Body `{ "preset": "momentum" \| "sniper" }` — apply named preset + persist. **409** if runner running |
-| GET | `/trades?limit=50` | Recent fills |
+| GET | `/trades?limit=50` | Recent fills (session ledger; cleared by Reset) |
+| GET | `/journal?limit=&offset=` | **Trade journal** — closed paper trades newest first (survives Reset) |
+| PATCH | `/journal/:id` | Body `{ "note": "…" }` — edit learning note |
+| DELETE | `/journal` | Explicit journal clear only (Reset does **not** clear journal) |
 
 CORS is open for local mobile / LAN browsers. Writes that start trading refuse unless `PAPER_MODE=true`. Live trading stays stubbed.
 
-**After a `daily_loss_cap` stop:** calling Start alone leaves realized PnL in the ledger, so the runner exits again on the next cycle. Hit **Reset** on the Android **PnL** tab (confirm dialog) or `POST /runner/reset` first.
+**After a `daily_loss_cap` stop:** calling Start alone leaves realized PnL in the ledger, so the runner exits again on the next cycle. Hit **Reset** on the Android **PnL** tab (confirm dialog) or `POST /runner/reset` first. Reset clears the session ledger but **keeps** `data/journal.json` (learning history).
 
 Other scripts:
 
@@ -147,8 +150,9 @@ npm run build
 
 Ledger output (under `data/`):
 
-- `trades.json` — full fill records  
+- `trades.json` — full fill records (session; cleared by Reset)  
 - `trades.csv` — spreadsheet-friendly log  
+- `journal.json` — append-only closed-trade journal + notes (survives Reset)  
 - Cash / positions / PnL printed each exit and at shutdown  
 
 ## Android APK (Capacitor control UI)
