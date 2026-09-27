@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Memecoin Paper Bot</string>
+    <string name="title_activity_main">Memecoin Paper Bot</string>
+    <string name="package_name">dev.anchortoken.memecoinbot</string>
+    <string name="custom_url_scheme">dev.anchortoken.memecoinbot</string>
+</resources>

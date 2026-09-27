@@ -1,0 +1,74 @@
+import { getApiBaseUrl } from "./settings";
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+  }
+}
+
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  const base = await getApiBaseUrl();
+  const url = `${base}${path.startsWith("/") ? path : `/${path}`}`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...init,
+      headers: {
+        Accept: "application/json",
+        ...(init?.body ? { "Content-Type": "application/json" } : {}),
+        ...(init?.headers ?? {}),
+      },
+    });
+  } catch (err) {
+    throw new ApiError(
+      `Cannot reach API at ${base}. Is the bot running (npm run api)? On USB try: adb reverse tcp:8787 tcp:8787. On Wi‑Fi use your laptop LAN IP.`,
+    );
+  }
+  const text = await res.text();
+  let body: unknown = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch {
+    body = text;
+  }
+  if (!res.ok) {
+    const msg =
+      typeof body === "object" && body && "message" in body
+        ? String((body as { message: unknown }).message)
+        : `HTTP ${res.status}`;
+    throw new ApiError(msg, res.status);
+  }
+  return body as T;
+}
+
+export const api = {
+  health: () => request<{ ok: boolean; paperMode: boolean }>("/health"),
+  status: () => request<Record<string, unknown>>("/status"),
+  config: () => request<{ config: Record<string, unknown> }>("/config"),
+  portfolio: () =>
+    request<{
+      bankrollUsd: number;
+      portfolio: {
+        cashUsd: number;
+        equityUsd: number;
+        realizedPnlUsd: number;
+        unrealizedPnlUsd: number;
+        tradeCount: number;
+        openPositions: Array<Record<string, unknown>>;
+      };
+    }>("/portfolio"),
+  trades: (limit = 40) =>
+    request<{ trades: Array<{ fill: Record<string, unknown>; realizedPnlUsd?: number; cashAfter: number }> }>(
+      `/trades?limit=${limit}`,
+    ),
+  start: () =>
+    request<{ ok: boolean; message: string }>("/runner/start", { method: "POST" }),
+  stop: () =>
+    request<{ ok: boolean; message: string }>("/runner/stop", { method: "POST" }),
+};
