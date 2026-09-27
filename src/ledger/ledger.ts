@@ -45,6 +45,11 @@ export class PaperLedger {
     return this.cashUsd;
   }
 
+  /** Session realized PnL (sum of closed paper sells). */
+  get realizedPnl(): number {
+    return this.realizedPnlUsd;
+  }
+
   /** Most recent trades first. */
   getTrades(limit = 50): TradeRecord[] {
     const n = Math.max(0, Math.floor(limit));

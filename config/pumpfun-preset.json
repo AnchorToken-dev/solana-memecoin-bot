@@ -5,16 +5,16 @@
   "stopLossPct": 10,
   "positionSizePct": 0.95,
   "momentum": {
-    "minPct": 8,
+    "minPct": 5,
     "windowMinutes": 5,
     "volumeSpikeMult": 2.0,
-    "minLiquidityUsd": 15000,
-    "minVolume24hUsd": 25000,
+    "minLiquidityUsd": 5000,
+    "minVolume24hUsd": 8000,
     "minAgeMinutes": 3
   },
   "trailingTakeProfit": {
-    "activatePct": 15,
-    "distancePct": 5
+    "activatePct": 10,
+    "distancePct": 7
   },
   "paperBroker": {
     "slippageBps": 50,
@@ -27,6 +27,6 @@
   },
   "maxHoldMinutes": 20,
   "dailyLossUsd": 5,
-  "marketDataSource": "mock",
+  "marketDataSource": "pumpfun",
   "ledgerDir": "data"
 }

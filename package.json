@@ -11,7 +11,7 @@
     "paper": "PAPER_MODE=true tsx src/index.ts",
     "api": "PAPER_MODE=true CONTROL_API=true tsx src/index.ts api",
     "api:dev": "PAPER_MODE=true CONTROL_API=true tsx watch src/index.ts api",
-    "test": "node --import tsx --test tests/risk.test.ts",
+    "test": "node --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "engines": {
