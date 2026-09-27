@@ -67,8 +67,21 @@ export const api = {
     request<{ trades: Array<{ fill: Record<string, unknown>; realizedPnlUsd?: number; cashAfter: number }> }>(
       `/trades?limit=${limit}`,
     ),
-  start: () =>
-    request<{ ok: boolean; message: string }>("/runner/start", { method: "POST" }),
+  start: (opts?: { reset?: boolean }) =>
+    request<{ ok: boolean; message: string }>(
+      opts?.reset ? "/runner/start?reset=1" : "/runner/start",
+      {
+        method: "POST",
+        body: opts?.reset ? JSON.stringify({ reset: true }) : undefined,
+      },
+    ),
   stop: () =>
     request<{ ok: boolean; message: string }>("/runner/stop", { method: "POST" }),
+  reset: () =>
+    request<{
+      ok: boolean;
+      message: string;
+      status: Record<string, unknown>;
+      portfolio: Record<string, unknown>;
+    }>("/runner/reset", { method: "POST" }),
 };

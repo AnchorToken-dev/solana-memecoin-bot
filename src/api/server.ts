@@ -65,7 +65,7 @@ export function createControlApp(engine: BotEngine) {
     res.json({ trades: engine.getTrades(limit) });
   });
 
-  app.post("/runner/start", async (_req, res) => {
+  app.post("/runner/start", async (req, res) => {
     if (!engine.cfg.paperMode) {
       res.status(403).json({
         ok: false,
@@ -75,13 +75,43 @@ export function createControlApp(engine: BotEngine) {
       });
       return;
     }
-    const result = await engine.start();
+    const q = req.query.reset;
+    const bodyReset =
+      typeof req.body === "object" &&
+      req.body != null &&
+      (req.body as { reset?: unknown }).reset === true;
+    const reset =
+      bodyReset ||
+      q === "1" ||
+      q === "true" ||
+      q === "yes";
+    const result = await engine.start({ reset });
     res.status(result.ok ? 200 : 403).json(result);
   });
 
   app.post("/runner/stop", async (_req, res) => {
     const result = await engine.stop();
     res.json(result);
+  });
+
+  /**
+   * Clear paper session (ledger → BANKROLL_USD, stopReason / cycles cleared).
+   * PAPER_MODE only. Unlocks start after daily_loss_cap.
+   */
+  app.post("/runner/reset", async (_req, res) => {
+    if (!engine.cfg.paperMode) {
+      const portfolio = await engine.getPortfolio();
+      res.status(403).json({
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing reset while live mode is configured (live is stubbed).",
+        status: engine.getStatus(),
+        portfolio,
+      });
+      return;
+    }
+    const result = await engine.reset();
+    res.status(result.ok ? 200 : 403).json(result);
   });
 
   app.use(

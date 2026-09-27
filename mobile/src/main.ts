@@ -144,14 +144,25 @@ async function paintStatus(main: Element) {
 async function paintControl(main: Element) {
   const status = await api.status();
   const running = status.state === "running" || status.state === "starting";
+  const stopReason =
+    typeof status.stopReason === "string" && status.stopReason
+      ? status.stopReason
+      : null;
   main.innerHTML = `
     <div class="card">
       <h2>Paper runner</h2>
       <p class="muted">Start/stop only works while the server has PAPER_MODE=true. Live trading is stubbed — this app never holds keys.</p>
       <div class="row"><span class="k">State</span><span class="v">${escapeHtml(String(status.state))}</span></div>
+      ${
+        stopReason
+          ? `<div class="row"><span class="k">Stop reason</span><span class="v warn-text">${escapeHtml(stopReason)}</span></div>
+             <p class="muted">Daily-loss (or other) lock stays until you Reset the paper session — Start alone does not clear the ledger.</p>`
+          : ""
+      }
       <div class="actions">
         <button class="primary" id="start" ${busy||running?"disabled":""}>Start paper bot</button>
         <button class="danger" id="stop" ${busy||!running?"disabled":""}>Stop</button>
+        <button class="secondary" id="reset" ${busy?"disabled":""}>Reset</button>
         <button class="secondary" id="refresh">Refresh</button>
       </div>
     </div>`;
@@ -164,6 +175,16 @@ async function paintControl(main: Element) {
   main.querySelector("#stop")?.addEventListener("click", () => {
     void withBusy(async () => {
       const r = await api.stop();
+      message = r.message;
+    });
+  });
+  main.querySelector("#reset")?.addEventListener("click", () => {
+    const ok = window.confirm(
+      "Reset paper session?\n\nThis stops the runner (if running), clears trades, and restores cash to BANKROLL_USD. The daily-loss lock is cleared so Start works again.",
+    );
+    if (!ok) return;
+    void withBusy(async () => {
+      const r = await api.reset();
       message = r.message;
     });
   });

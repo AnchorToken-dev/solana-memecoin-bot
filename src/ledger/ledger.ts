@@ -113,6 +113,24 @@ export class PaperLedger {
     };
   }
 
+  /**
+   * Clear session state for a fresh paper run: cash back to bankroll,
+   * no positions, zero realized PnL, empty in-memory trades, and rewrite
+   * trades.json / trades.csv (header only). Does not delete the ledger dir.
+   */
+  resetSession(bankrollUsd: number): void {
+    this.cashUsd = bankrollUsd;
+    this.positions = [];
+    this.realizedPnlUsd = 0;
+    this.trades = [];
+    writeFileSync(this.jsonPath, "[]\n");
+    writeFileSync(
+      this.csvPath,
+      "timestamp,side,symbol,mint,qty,price,notionalUsd,feesUsd,slippageUsd,reason,realizedPnlUsd,cashAfter\n",
+    );
+    log.info(`Paper ledger reset: cash=$${bankrollUsd.toFixed(2)}, trades cleared`);
+  }
+
   private persist(rec: TradeRecord): void {
     // JSON array rewrite (small paper ledgers)
     let all: TradeRecord[] = [];

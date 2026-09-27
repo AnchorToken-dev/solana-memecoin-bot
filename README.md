@@ -38,7 +38,7 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 2. **Hard stop** — if mark ≤ entry × `(1 - STOP_LOSS_PCT/100)`, sell.
 3. **Time stop** — if held ≥ `MAX_HOLD_MINUTES`, sell (`time_stop`).
 4. **Trailing TP** — after unrealized gain ≥ `TRAIL_ACTIVATE_PCT`, arm a trail; sell if mark ≤ high-water × `(1 - TRAIL_DISTANCE_PCT/100)`.
-5. **Daily loss cap** — when session realized PnL ≤ `−DAILY_LOSS_USD`, the runner stops (no new paper entries).
+5. **Daily loss cap** — when session realized PnL ≤ `−DAILY_LOSS_USD`, the runner stops (no new paper entries). **Start does not clear the ledger** — use `POST /runner/reset` (or Start with `?reset=1`) / the app **Reset** button to restore `BANKROLL_USD` cash and unlock another session.
 
 ## Quick start (paper mode, Linux)
 
@@ -95,14 +95,17 @@ npm run api
 | Method | Path | Notes |
 |--------|------|--------|
 | GET | `/health` | Liveness |
-| GET | `/status` | Runner state, cycle, errors |
-| POST | `/runner/start` | **PAPER_MODE only** |
+| GET | `/status` | Runner state, cycle, `stopReason`, errors |
+| POST | `/runner/start` | **PAPER_MODE only**. Optional `?reset=1` or JSON `{ "reset": true }` clears the paper session first |
 | POST | `/runner/stop` | Stop loop |
+| POST | `/runner/reset` | **PAPER_MODE only**: stop if running, rebuild ledger to `BANKROLL_USD`, clear `stopReason` / cycles, empty trades. Response includes `status` + `portfolio` |
 | GET | `/portfolio` | Bankroll / cash / equity / PnL / positions |
 | GET | `/config` | Public config (no secrets) |
 | GET | `/trades?limit=50` | Recent fills |
 
 CORS is open for local mobile / LAN browsers. Writes that start trading refuse unless `PAPER_MODE=true`. Live trading stays stubbed.
+
+**After a `daily_loss_cap` stop:** calling Start alone leaves realized PnL in the ledger, so the runner exits again on the next cycle. Hit **Reset** in the Android Run tab (confirm dialog) or `POST /runner/reset` first.
 
 Other scripts:
 
@@ -135,7 +138,7 @@ Location: `mobile/` — Vite + Capacitor Android shell. **No wallet / no private
      find laptop IP (`ip -4 addr` or `hostname -I`)  
      then API URL `http://<laptop-lan-ip>:8787`  
      (allow port 8787 in the laptop firewall if needed)
-3. **Status** / **Run** / **PnL** / **Trades** tabs hit that API. Start paper bot from **Run** (server must have `PAPER_MODE=true`).
+3. **Status** / **Run** / **PnL** / **Trades** tabs hit that API. Start / Stop / **Reset** paper session from **Run** (server must have `PAPER_MODE=true`). Reset clears the ledger and any `stopReason` (e.g. daily-loss lock).
 
 ### Build a debug APK on Linux
 
