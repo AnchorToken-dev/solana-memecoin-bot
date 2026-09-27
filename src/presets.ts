@@ -8,27 +8,34 @@ export type PresetName = "momentum" | "sniper";
 
 export const PRESET_NAMES: readonly PresetName[] = ["momentum", "sniper"] as const;
 
-/** Fields a preset overwrites (paper knobs only — never paperMode / market / ledger). */
+/**
+ * Fields a named preset overwrites (strategy knobs only).
+ * Session risk — bankrollUsd / dailyLossUsd — is NOT in a preset; applyPresetKnobs
+ * preserves them from the current config (Mark’s sticky $100 / $25).
+ */
 export type PresetKnobs = Pick<
   BotConfig,
-  | "bankrollUsd"
   | "stopLossPct"
   | "takeProfitPct"
   | "positionSizePct"
   | "momentum"
   | "trailingTakeProfit"
   | "maxHoldMinutes"
-  | "dailyLossUsd"
 > & {
   runner: Pick<BotConfig["runner"], "pollIntervalMs">;
 };
+
+/** Optional documented defaults for display only — never applied by applyPresetKnobs. */
+export const PRESET_DISPLAY_RISK = {
+  bankrollUsd: 20,
+  dailyLossUsd: 5,
+} as const;
 
 /**
  * Momentum — current Pump.fun research defaults (config/pumpfun-preset.json).
  * Slightly looser entry floors vs stock default.json; standard 10% stop / 25% TP.
  */
 export const MOMENTUM_PRESET: PresetKnobs = {
-  bankrollUsd: 20,
   stopLossPct: 10,
   takeProfitPct: 25,
   positionSizePct: 0.95,
@@ -45,7 +52,6 @@ export const MOMENTUM_PRESET: PresetKnobs = {
     distancePct: 7,
   },
   maxHoldMinutes: 20,
-  dailyLossUsd: 5,
   runner: {
     pollIntervalMs: 15_000,
   },
@@ -55,7 +61,6 @@ export const MOMENTUM_PRESET: PresetKnobs = {
  * Sniper — newer coins OK, lower age/liq floors, tighter stop, lower TP / faster trail.
  */
 export const SNIPER_PRESET: PresetKnobs = {
-  bankrollUsd: 20,
   stopLossPct: 8,
   takeProfitPct: 15,
   positionSizePct: 0.95,
@@ -72,7 +77,6 @@ export const SNIPER_PRESET: PresetKnobs = {
     distancePct: 4,
   },
   maxHoldMinutes: 10,
-  dailyLossUsd: 5,
   runner: {
     pollIntervalMs: 10_000,
   },
@@ -87,20 +91,27 @@ export function isPresetName(v: unknown): v is PresetName {
   return v === "momentum" || v === "sniper";
 }
 
-/** Deep-apply preset knobs onto a mutable BotConfig (in place). */
+/**
+ * Deep-apply strategy knobs onto a mutable BotConfig (in place).
+ * Preserves cfg.bankrollUsd and cfg.dailyLossUsd (session risk).
+ */
 export function applyPresetKnobs(cfg: BotConfig, preset: PresetName): void {
   const knobs = PRESETS[preset];
-  cfg.bankrollUsd = knobs.bankrollUsd;
+  // Sticky session risk — do not wipe Mark’s bankroll / daily loss cap.
+  const stickyBankroll = cfg.bankrollUsd;
+  const stickyDailyLoss = cfg.dailyLossUsd;
+
   cfg.stopLossPct = knobs.stopLossPct;
   cfg.takeProfitPct = knobs.takeProfitPct;
   cfg.positionSizePct = knobs.positionSizePct;
   cfg.momentum = { ...knobs.momentum };
   cfg.trailingTakeProfit = { ...knobs.trailingTakeProfit };
   cfg.maxHoldMinutes = knobs.maxHoldMinutes;
-  cfg.dailyLossUsd = knobs.dailyLossUsd;
   cfg.runner = {
     ...cfg.runner,
     pollIntervalMs: knobs.runner.pollIntervalMs,
   };
+  cfg.bankrollUsd = stickyBankroll;
+  cfg.dailyLossUsd = stickyDailyLoss;
   cfg.activePreset = preset;
 }

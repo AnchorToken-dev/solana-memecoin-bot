@@ -257,11 +257,11 @@ describe("loadConfig runtime overlay persistence", () => {
     seed.stopLossPct = SNIPER_PRESET.stopLossPct;
     seed.takeProfitPct = SNIPER_PRESET.takeProfitPct;
     seed.positionSizePct = SNIPER_PRESET.positionSizePct;
-    seed.bankrollUsd = SNIPER_PRESET.bankrollUsd;
+    seed.bankrollUsd = 100; // session risk — not part of preset knobs
     seed.momentum = { ...SNIPER_PRESET.momentum };
     seed.trailingTakeProfit = { ...SNIPER_PRESET.trailingTakeProfit };
     seed.maxHoldMinutes = SNIPER_PRESET.maxHoldMinutes;
-    seed.dailyLossUsd = SNIPER_PRESET.dailyLossUsd;
+    seed.dailyLossUsd = 25;
     seed.runner.pollIntervalMs = SNIPER_PRESET.runner.pollIntervalMs;
     seed.activePreset = "sniper";
     saveRuntimeOverlay(overlayFromConfig(seed), overlayPath);

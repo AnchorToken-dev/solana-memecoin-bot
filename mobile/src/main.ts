@@ -392,6 +392,7 @@ async function paintSettings(main: Element, base: string) {
     <div class="card">
       <h2>Strategy preset</h2>
       <p class="muted">Paper knobs only. Applying a preset requires the runner <strong>stopped</strong>.</p>
+      <p class="muted"><strong>Session risk:</strong> Bankroll USD and Daily loss USD are sticky — switching Momentum ↔ Sniper does <em>not</em> reset them. Edit those fields + Save if you want new risk sizes.</p>
       <div class="row"><span class="k">Active preset</span><span class="v" id="activePresetLabel">${escapeHtml(active)}</span></div>
       <div class="preset-toggle" role="group" aria-label="Preset">
         <button type="button" class="preset-btn ${active==="momentum"?"active":""}" id="presetMomentum" ${busy||running?"disabled":""}>Momentum</button>
@@ -406,13 +407,13 @@ async function paintSettings(main: Element, base: string) {
     <div class="card">
       <h2>Paper parameters</h2>
       <div class="field-grid">
-        <label>Bankroll USD<input id="fBankroll" type="number" step="0.01" min="0.01" value="${escapeAttr(num(cfg.bankrollUsd))}" /></label>
+        <label>Bankroll USD <span class="muted">(session risk)</span><input id="fBankroll" type="number" step="0.01" min="0.01" value="${escapeAttr(num(cfg.bankrollUsd))}" /></label>
         <label>Stop loss %<input id="fStop" type="number" step="0.1" min="0.1" value="${escapeAttr(num(cfg.stopLossPct))}" /></label>
         <label>Take profit %<input id="fTp" type="number" step="0.1" min="0" value="${escapeAttr(num(cfg.takeProfitPct))}" /></label>
         <label>Trail activate %<input id="fTrailAct" type="number" step="0.1" min="0.1" value="${escapeAttr(num(trail.activatePct))}" /></label>
         <label>Trail distance %<input id="fTrailDist" type="number" step="0.1" min="0.1" value="${escapeAttr(num(trail.distancePct))}" /></label>
         <label>Max hold min<input id="fHold" type="number" step="1" min="0" value="${escapeAttr(num(cfg.maxHoldMinutes))}" /></label>
-        <label>Daily loss USD<input id="fDaily" type="number" step="0.01" min="0" value="${escapeAttr(num(cfg.dailyLossUsd))}" /></label>
+        <label>Daily loss USD <span class="muted">(session risk)</span><input id="fDaily" type="number" step="0.01" min="0" value="${escapeAttr(num(cfg.dailyLossUsd))}" /></label>
         <label>Poll interval ms<input id="fPoll" type="number" step="100" min="100" value="${escapeAttr(num(runner.pollIntervalMs))}" /></label>
         <label>Momentum min %<input id="fMomPct" type="number" step="0.1" min="0.1" value="${escapeAttr(num(mom.minPct))}" /></label>
         <label>Min age min<input id="fAge" type="number" step="1" min="0" value="${escapeAttr(num(mom.minAgeMinutes))}" /></label>
