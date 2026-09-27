@@ -169,7 +169,6 @@ async function paintControl(main: Element) {
       ? status.stopReason
       : null;
   const openCount = portfolioWrap.portfolio.openPositions?.length ?? 0;
-  const hasOpen = openCount > 0;
   const cfg = cfgWrap.config ?? {};
   const tp =
     typeof cfg.takeProfitPct === "number" ? cfg.takeProfitPct : null;
@@ -183,17 +182,15 @@ async function paintControl(main: Element) {
       ${
         stopReason
           ? `<div class="row"><span class="k">Stop reason</span><span class="v warn-text">${escapeHtml(stopReason)}</span></div>
-             <p class="muted">Daily-loss (or other) lock stays until you Reset the paper session — Start alone does not clear the ledger.</p>`
+             <p class="muted">Daily-loss (or other) lock stays until you <strong>Reset</strong> on the PnL tab — Start alone does not clear the ledger.</p>`
           : ""
       }
       <div class="actions">
         <button class="primary" id="start" ${busy||running?"disabled":""}>Start paper bot</button>
         <button class="danger" id="stop" ${busy||!running?"disabled":""}>Stop</button>
-        <button class="danger" id="exitNow" ${busy||!hasOpen?"disabled":""}>Exit now</button>
-        <button class="secondary" id="reset" ${busy?"disabled":""}>Reset</button>
         <button class="secondary" id="refresh">Refresh</button>
       </div>
-      <p class="muted" style="margin-top:10px">Exit now flattens the open paper position at the current mark (manual_exit). Change take-profit via server env <code>TAKE_PROFIT_PCT</code> (default 25; 0 = off).</p>
+      <p class="muted" style="margin-top:10px"><strong>Exit now</strong> / <strong>Reset</strong> live on the <strong>PnL</strong> tab (near equity / open position). Change take-profit via server env <code>TAKE_PROFIT_PCT</code> (default 25; 0 = off).</p>
     </div>`;
   main.querySelector("#start")?.addEventListener("click", () => {
     void withBusy(async () => {
@@ -207,6 +204,49 @@ async function paintControl(main: Element) {
       message = r.message;
     });
   });
+  main.querySelector("#refresh")?.addEventListener("click", () => void render());
+}
+
+async function paintBankroll(main: Element) {
+  const [data, status] = await Promise.all([api.portfolio(), api.status()]);
+  const p = data.portfolio;
+  const positions = p.openPositions ?? [];
+  const hasOpen = positions.length > 0;
+  const stopReason =
+    typeof status.stopReason === "string" && status.stopReason
+      ? status.stopReason
+      : null;
+  main.innerHTML = `
+    <div class="card">
+      <h2>Bankroll / PnL</h2>
+      <div class="row"><span class="k">Configured bankroll</span><span class="v" data-k="bankroll">${money(data.bankrollUsd)}</span></div>
+      <div class="row"><span class="k">Cash</span><span class="v" data-k="cash">${money(p.cashUsd)}</span></div>
+      <div class="row"><span class="k">Equity</span><span class="v" data-k="equity">${money(p.equityUsd)}</span></div>
+      <div class="row"><span class="k">Realized PnL</span><span class="v" data-k="realized">${money(p.realizedPnlUsd)}</span></div>
+      <div class="row"><span class="k">Unrealized PnL</span><span class="v" data-k="unrealized">${money(p.unrealizedPnlUsd)}</span></div>
+      <div class="row"><span class="k">Trades</span><span class="v" data-k="trades">${escapeHtml(String(p.tradeCount))}</span></div>
+      ${
+        stopReason
+          ? `<div class="row"><span class="k">Stop reason</span><span class="v warn-text" data-k="stopReason">${escapeHtml(stopReason)}</span></div>
+             <p class="muted">Use <strong>Reset</strong> below to clear the ledger / daily-loss lock before Start will stick.</p>`
+          : `<div class="row hidden" id="stopReasonRow"><span class="k">Stop reason</span><span class="v" data-k="stopReason">—</span></div>`
+      }
+      <div class="actions">
+        <button class="danger" id="exitNow" ${busy||!hasOpen?"disabled":""}>Exit now</button>
+        <button class="secondary" id="reset" ${busy?"disabled":""}>Reset</button>
+        <button class="secondary" id="refresh">Refresh</button>
+      </div>
+      <p class="muted" style="margin-top:10px">Exit now flattens the open paper position at the current mark (<code>manual_exit</code>). Reset restores <code>BANKROLL_USD</code> cash and clears <code>stopReason</code>. Start/Stop stay on the Run tab.</p>
+    </div>
+    <div class="card">
+      <h2>Open positions (${positions.length})</h2>
+      ${
+        positions.length === 0
+          ? `<p class="muted">Flat — no open paper positions.</p>`
+          : positions.map((pos) => renderOpenPosition(pos)).join("")
+      }
+    </div>`;
+  main.querySelector("#refresh")?.addEventListener("click", () => void render());
   main.querySelector("#reset")?.addEventListener("click", () => {
     const ok = window.confirm(
       "Reset paper session?\n\nThis stops the runner (if running), clears trades, and restores cash to BANKROLL_USD. The daily-loss lock is cleared so Start works again.",
@@ -227,39 +267,57 @@ async function paintControl(main: Element) {
       message = r.message;
     });
   });
-  main.querySelector("#refresh")?.addEventListener("click", () => void render());
 }
 
-async function paintBankroll(main: Element) {
-  const data = await api.portfolio();
-  const p = data.portfolio;
-  const positions = p.openPositions ?? [];
-  main.innerHTML = `
-    <div class="card">
-      <h2>Bankroll / PnL</h2>
-      <div class="row"><span class="k">Configured bankroll</span><span class="v">${money(data.bankrollUsd)}</span></div>
-      <div class="row"><span class="k">Cash</span><span class="v">${money(p.cashUsd)}</span></div>
-      <div class="row"><span class="k">Equity</span><span class="v">${money(p.equityUsd)}</span></div>
-      <div class="row"><span class="k">Realized PnL</span><span class="v">${money(p.realizedPnlUsd)}</span></div>
-      <div class="row"><span class="k">Unrealized PnL</span><span class="v">${money(p.unrealizedPnlUsd)}</span></div>
-      <div class="row"><span class="k">Trades</span><span class="v">${escapeHtml(String(p.tradeCount))}</span></div>
-      <div class="actions"><button class="secondary" id="refresh">Refresh</button></div>
-    </div>
-    <div class="card">
-      <h2>Open positions (${positions.length})</h2>
-      ${
-        positions.length === 0
-          ? `<p class="muted">Flat — no open paper positions.</p>`
-          : positions.map((pos) => `
-            <div class="trade">
-              <strong>${escapeHtml(String(pos.symbol))}</strong>
-              · qty ${escapeHtml(String(Number(pos.qty).toFixed?.(4) ?? pos.qty))}
-              · entry ${escapeHtml(String(pos.entryPrice))}
-              · trail ${pos.trailArmed ? "armed" : "off"}
-            </div>`).join("")
-      }
+/**
+ * Live chart for an open mint.
+ * Pump.fun sets X-Frame-Options: SAMEORIGIN / CSP frame-ancestors 'self', so it
+ * cannot be iframed in the Capacitor WebView — use DexScreener embed + external Pump.fun link.
+ * See docs/pnl-chart.md.
+ */
+function renderOpenPosition(pos: {
+  mint: string;
+  symbol: string;
+  qty: number;
+  entryPrice: number;
+  trailArmed?: boolean;
+}): string {
+  const mint = String(pos.mint ?? "");
+  const symbol = String(pos.symbol ?? "?");
+  const qty =
+    typeof pos.qty === "number" && Number.isFinite(pos.qty)
+      ? pos.qty.toFixed(4)
+      : String(pos.qty);
+  const pumpUrl = `https://pump.fun/coin/${encodeURIComponent(mint)}`;
+  // Official DexScreener embed (no X-Frame-Options block observed; works in WebView).
+  const dexEmbed = `https://dexscreener.com/solana/${encodeURIComponent(mint)}?embed=1&theme=dark&trades=0&info=0`;
+  return `
+    <div class="position-block">
+      <div class="trade">
+        <strong>${escapeHtml(symbol)}</strong>
+        · qty ${escapeHtml(qty)}
+        · entry ${escapeHtml(String(pos.entryPrice))}
+        · trail ${pos.trailArmed ? "armed" : "off"}
+      </div>
+      <div class="row"><span class="k">Mint</span><span class="v mint">${escapeHtml(mint)}</span></div>
+      <div class="chart-wrap">
+        <iframe
+          class="chart-frame"
+          data-mint="${escapeAttr(mint)}"
+          src="${escapeAttr(dexEmbed)}"
+          title="DexScreener chart ${escapeAttr(symbol)}"
+          loading="lazy"
+          referrerpolicy="no-referrer-when-downgrade"
+          allow="clipboard-write; fullscreen"
+        ></iframe>
+      </div>
+      <p class="muted chart-note">
+        Embedded: <strong>DexScreener</strong> (Pump.fun blocks iframes).
+        <a href="${escapeAttr(pumpUrl)}" target="_blank" rel="noopener noreferrer">Open on Pump.fun</a>
+        ·
+        <a href="${escapeAttr(`https://dexscreener.com/solana/${encodeURIComponent(mint)}`)}" target="_blank" rel="noopener noreferrer">Open DexScreener</a>
+      </p>
     </div>`;
-  main.querySelector("#refresh")?.addEventListener("click", () => void render());
 }
 
 async function paintTrades(main: Element) {
@@ -286,6 +344,48 @@ async function paintTrades(main: Element) {
   main.querySelector("#refresh")?.addEventListener("click", () => void render());
 }
 
+/** Update PnL numbers without rebuilding the chart iframe. */
+async function softRefreshBankroll() {
+  try {
+    const [data, status] = await Promise.all([api.portfolio(), api.status()]);
+    const p = data.portfolio;
+    const main = app.querySelector("#main");
+    if (!main) return;
+    const set = (key: string, val: string) => {
+      const el = main.querySelector(`[data-k="${key}"]`);
+      if (el) el.textContent = val;
+    };
+    set("bankroll", money(data.bankrollUsd));
+    set("cash", money(p.cashUsd));
+    set("equity", money(p.equityUsd));
+    set("realized", money(p.realizedPnlUsd));
+    set("unrealized", money(p.unrealizedPnlUsd));
+    set("trades", String(p.tradeCount));
+    const stopEl = main.querySelector("[data-k=\"stopReason\"]");
+    const stopReason =
+      typeof status.stopReason === "string" && status.stopReason
+        ? status.stopReason
+        : null;
+    if (stopEl) {
+      stopEl.textContent = stopReason ?? "—";
+      (stopEl as HTMLElement).classList.toggle("warn-text", Boolean(stopReason));
+    }
+    const positions = p.openPositions ?? [];
+    const exitBtn = main.querySelector("#exitNow") as HTMLButtonElement | null;
+    if (exitBtn) exitBtn.disabled = busy || positions.length === 0;
+    // If flat or mint changed, do a full paint so chart appears/disappears correctly.
+    const frame = main.querySelector(".chart-frame") as HTMLIFrameElement | null;
+    const openMint = positions[0]?.mint ?? null;
+    const frameMint = frame?.dataset.mint ?? null;
+    if ((openMint ?? null) !== (frameMint ?? null)) {
+      await paintBankroll(main);
+    }
+  } catch {
+    // Fall back to full render on soft-refresh failure.
+    void render();
+  }
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]!));
 }
@@ -295,5 +395,11 @@ function escapeAttr(s: string): string {
 
 void render();
 setInterval(() => {
-  if (tab !== "settings" && !busy && !document.hidden) void render();
+  if (busy || document.hidden || tab === "settings") return;
+  // Keep the live chart iframe mounted; only soft-update numbers on PnL.
+  if (tab === "bankroll" && document.querySelector(".chart-frame")) {
+    void softRefreshBankroll();
+    return;
+  }
+  void render();
 }, 8000);

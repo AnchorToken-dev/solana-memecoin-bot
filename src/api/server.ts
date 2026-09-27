@@ -45,6 +45,7 @@ export function createControlApp(engine: BotEngine) {
 
   app.get("/portfolio", async (_req, res) => {
     try {
+      // portfolio.openPositions[] includes mint + symbol (Position) for chart URLs.
       const portfolio = await engine.getPortfolio();
       res.json({
         bankrollUsd: engine.cfg.bankrollUsd,

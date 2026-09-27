@@ -102,3 +102,31 @@ label { display: block; color: var(--muted); font-size: 0.85rem; margin-bottom: 
 .hidden { display: none !important; }
 
 .warn-text { color: var(--warn); font-weight: 600; max-width: 60%; text-align: right; word-break: break-word; }
+
+.position-block { margin-top: 4px; }
+.position-block .mint {
+  font-size: 0.7rem;
+  font-weight: 500;
+  word-break: break-all;
+  max-width: 65%;
+  text-align: right;
+}
+.chart-wrap {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0f172a;
+  aspect-ratio: 4 / 3;
+  min-height: 220px;
+}
+.chart-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 220px;
+  border: 0;
+  display: block;
+  background: #0f172a;
+}
+.chart-note { margin-top: 8px; }
+.chart-note a { color: #93c5fd; }
