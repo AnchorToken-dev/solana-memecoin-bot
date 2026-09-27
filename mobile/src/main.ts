@@ -122,7 +122,17 @@ function label(t: Tab): string {
 }
 
 async function paintStatus(main: Element) {
-  const [health, status] = await Promise.all([api.health(), api.status()]);
+  const [health, status, cfgWrap] = await Promise.all([
+    api.health(),
+    api.status(),
+    api.config(),
+  ]);
+  const cfg = cfgWrap.config ?? {};
+  const tp =
+    typeof cfg.takeProfitPct === "number" ? cfg.takeProfitPct : null;
+  const trail = cfg.trailingTakeProfit as
+    | { activatePct?: number; distancePct?: number }
+    | undefined;
   main.innerHTML = `
     <div class="card">
       <h2>Engine status</h2>
@@ -131,6 +141,12 @@ async function paintStatus(main: Element) {
       <div class="row"><span class="k">State</span><span class="v">${escapeHtml(String(status.state))}</span></div>
       <div class="row"><span class="k">Cycle</span><span class="v">${escapeHtml(String(status.cycle ?? 0))}</span></div>
       <div class="row"><span class="k">Source</span><span class="v">${escapeHtml(String(status.marketDataSource ?? "—"))}</span></div>
+      <div class="row"><span class="k">Take-profit</span><span class="v">${tp == null ? "—" : tp <= 0 ? "off" : `+${tp}%`}</span></div>
+      <div class="row"><span class="k">Trail</span><span class="v">${
+        trail?.activatePct != null && trail?.distancePct != null
+          ? `+${trail.activatePct}% / ${trail.distancePct}%`
+          : "—"
+      }</span></div>
       <div class="row"><span class="k">Started</span><span class="v">${fmtTs(status.startedAt)}</span></div>
       <div class="row"><span class="k">Last cycle</span><span class="v">${fmtTs(status.lastCycleAt)}</span></div>
       <div class="row"><span class="k">Last error</span><span class="v">${escapeHtml(String(status.lastError ?? "—"))}</span></div>
@@ -142,17 +158,28 @@ async function paintStatus(main: Element) {
 }
 
 async function paintControl(main: Element) {
-  const status = await api.status();
+  const [status, portfolioWrap, cfgWrap] = await Promise.all([
+    api.status(),
+    api.portfolio(),
+    api.config(),
+  ]);
   const running = status.state === "running" || status.state === "starting";
   const stopReason =
     typeof status.stopReason === "string" && status.stopReason
       ? status.stopReason
       : null;
+  const openCount = portfolioWrap.portfolio.openPositions?.length ?? 0;
+  const hasOpen = openCount > 0;
+  const cfg = cfgWrap.config ?? {};
+  const tp =
+    typeof cfg.takeProfitPct === "number" ? cfg.takeProfitPct : null;
   main.innerHTML = `
     <div class="card">
       <h2>Paper runner</h2>
       <p class="muted">Start/stop only works while the server has PAPER_MODE=true. Live trading is stubbed — this app never holds keys.</p>
       <div class="row"><span class="k">State</span><span class="v">${escapeHtml(String(status.state))}</span></div>
+      <div class="row"><span class="k">Open positions</span><span class="v">${openCount}</span></div>
+      <div class="row"><span class="k">Take-profit</span><span class="v">${tp == null ? "—" : tp <= 0 ? "off (env TAKE_PROFIT_PCT)" : `+${tp}% (env TAKE_PROFIT_PCT)`}</span></div>
       ${
         stopReason
           ? `<div class="row"><span class="k">Stop reason</span><span class="v warn-text">${escapeHtml(stopReason)}</span></div>
@@ -162,9 +189,11 @@ async function paintControl(main: Element) {
       <div class="actions">
         <button class="primary" id="start" ${busy||running?"disabled":""}>Start paper bot</button>
         <button class="danger" id="stop" ${busy||!running?"disabled":""}>Stop</button>
+        <button class="danger" id="exitNow" ${busy||!hasOpen?"disabled":""}>Exit now</button>
         <button class="secondary" id="reset" ${busy?"disabled":""}>Reset</button>
         <button class="secondary" id="refresh">Refresh</button>
       </div>
+      <p class="muted" style="margin-top:10px">Exit now flattens the open paper position at the current mark (manual_exit). Change take-profit via server env <code>TAKE_PROFIT_PCT</code> (default 25; 0 = off).</p>
     </div>`;
   main.querySelector("#start")?.addEventListener("click", () => {
     void withBusy(async () => {
@@ -185,6 +214,16 @@ async function paintControl(main: Element) {
     if (!ok) return;
     void withBusy(async () => {
       const r = await api.reset();
+      message = r.message;
+    });
+  });
+  main.querySelector("#exitNow")?.addEventListener("click", () => {
+    const ok = window.confirm(
+      "Exit now?\n\nFlatten the open paper position at the current mark (manual_exit). The runner keeps running if it was started.",
+    );
+    if (!ok) return;
+    void withBusy(async () => {
+      const r = await api.exitNow();
       message = r.message;
     });
   });

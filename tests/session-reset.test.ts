@@ -16,6 +16,7 @@ function baseCfg(over: Partial<BotConfig> = {}): BotConfig {
     bankrollUsd: 20,
     maxOpenTrades: 1,
     stopLossPct: 10,
+    takeProfitPct: 25,
     positionSizePct: 0.95,
     momentum: {
       minPct: 8,

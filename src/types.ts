@@ -37,6 +37,11 @@ export interface BotConfig {
   bankrollUsd: number;
   maxOpenTrades: number;
   stopLossPct: number;
+  /**
+   * Hard take-profit: exit when unrealized gain ≥ this % from entry.
+   * 0 = disabled. Default 25.
+   */
+  takeProfitPct: number;
   positionSizePct: number;
   momentum: MomentumParams;
   trailingTakeProfit: TrailingTakeProfitParams;
@@ -78,9 +83,10 @@ export interface TokenSnapshot {
 export type Side = "buy" | "sell";
 export type ExitReason =
   | "stop_loss"
+  | "take_profit"
   | "trailing_take_profit"
   | "time_stop"
-  | "manual"
+  | "manual_exit"
   | "risk_flat";
 
 export interface Position {
