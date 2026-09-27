@@ -36,7 +36,7 @@ const ConfigSchema = z.object({
     scanLimit: z.number().int().positive(),
     maxCycles: z.number().int().nonnegative(),
   }),
-  marketDataSource: z.enum(["mock", "dexscreener"]),
+  marketDataSource: z.enum(["mock", "dexscreener", "pumpfun"]),
   ledgerDir: z.string().min(1),
 });
 
@@ -133,8 +133,8 @@ export function loadConfig(): BotConfig {
     },
     marketDataSource: envStr(
       "MARKET_DATA_SOURCE",
-      (file.marketDataSource as "mock" | "dexscreener") ?? "mock",
-      ["mock", "dexscreener"] as const,
+      (file.marketDataSource as "mock" | "dexscreener" | "pumpfun") ?? "mock",
+      ["mock", "dexscreener", "pumpfun"] as const,
     ),
     ledgerDir: envStr("LEDGER_DIR", file.ledgerDir ?? "data"),
   };

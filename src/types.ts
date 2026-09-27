@@ -37,7 +37,7 @@ export interface BotConfig {
   trailingTakeProfit: TrailingTakeProfitParams;
   paperBroker: PaperBrokerParams;
   runner: RunnerParams;
-  marketDataSource: "mock" | "dexscreener";
+  marketDataSource: "mock" | "dexscreener" | "pumpfun";
   ledgerDir: string;
 }
 

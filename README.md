@@ -25,7 +25,7 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 | Trail distance | `5%` from HWM | `TRAIL_DISTANCE_PCT` |
 | Slippage (sim) | `50` bps | `SLIPPAGE_BPS` |
 | Fee (sim) | `30` bps | `FEE_BPS` |
-| Market data | `mock` | `MARKET_DATA_SOURCE=mock\|dexscreener` |
+| Market data | `mock` | `MARKET_DATA_SOURCE=mock\|dexscreener\|pumpfun` |
 | Control API | `0.0.0.0:8787` | `API_HOST` / `API_PORT` |
 
 ### Strategy (readable for tweaking)
@@ -55,6 +55,16 @@ Use public DexScreener data instead of the mock feed:
 ```bash
 MARKET_DATA_SOURCE=dexscreener MAX_CYCLES=5 npm start
 ```
+
+Paper-trade against **Pump.fun-style** listings (unofficial frontend API + DexScreener enrich/fallback). Fills stay simulated:
+
+```bash
+MARKET_DATA_SOURCE=pumpfun PAPER_MODE=true MAX_CYCLES=5 npm start
+# or with the control API:
+MARKET_DATA_SOURCE=pumpfun npm run api
+```
+
+See [docs/pumpfun-market-data.md](docs/pumpfun-market-data.md) for exact URLs, field mapping, and rate-limit / fragility notes.
 
 ### Control API (for the phone UI)
 
@@ -182,7 +192,8 @@ cd mobile/android
 ```
 src/
   config.ts           # env + config/default.json
-  market/data.ts      # mock + DexScreener (public, no key)
+  market/data.ts      # mock + DexScreener + Pump.fun factory
+  market/pumpfun.ts   # Pump.fun frontend API (paper) + Dex fallback
   strategy/momentum.ts
   risk/manager.ts     # sizing + max trades + stop helper
   broker/paper.ts     # sim fills (slippage/fees); live stub throws
@@ -194,7 +205,8 @@ src/
 mobile/               # Capacitor Android control UI
   src/                # Status, Run, PnL, Trades, Settings
   android/            # Gradle project (assembleDebug → APK)
-tests/risk.test.ts
+tests/*.test.ts
+docs/pumpfun-market-data.md
 config/default.json
 .env.example
 ```
@@ -205,7 +217,15 @@ config/default.json
 |--------|------|-------|
 | **mock** (default) | No | Deterministic fixtures for offline / CI |
 | **DexScreener** | No | Public REST; rate-limited; best-effort |
+| **pumpfun** | No | Unofficial `frontend-api-v3.pump.fun` coin lists + `sol-price`; optional DexScreener enrich (`pumpfun`/`pumpswap` pools) and labeled DexScreener search fallback. **Paper fills only.** May break without notice. Details: [docs/pumpfun-market-data.md](docs/pumpfun-market-data.md) |
 | Birdeye / Jupiter | Optional later | Stub + document only — set `BIRDEYE_API_KEY` / `JUPITER_API_KEY` in `.env` when you wire them; not used in paper path |
+
+### Pump.fun paper mode (what runs under the hood)
+
+1. **Primary:** `GET https://frontend-api-v3.pump.fun/coins?...` (hot by `last_trade_timestamp` + new by `created_timestamp`) and `GET .../sol-price`.
+2. **Enrich (default):** DexScreener `/latest/dex/tokens/{mint}` for m5 % change / volume (Pump list payloads lack those windows).
+3. **Fallback (default, labeled in logs):** DexScreener search filtered to `dexId` ∈ `{pumpfun, pumpswap}` if the frontend API fails or is empty.
+4. **Broker:** still `PaperBroker` — no wallet, no live Pump.fun/Jupiter swap.
 
 ## Live wiring (stub only)
 
@@ -214,7 +234,7 @@ Live mode **refuses to start** (`assertPaperOrStubLive`). API `POST /runner/star
 1. Keep keys **out of git** — load a keypair path from env (`LIVE_WALLET_KEYPAIR_PATH`), never commit it.  
 2. Replace `liveSwapStub` in `src/broker/paper.ts` with:
    - **Jupiter** quote + swap API, or  
-   - **Raydium** SDK swap helpers  
+   - **Raydium** / **PumpSwap** SDK swap helpers (Pump.fun bonding-curve buys are a separate integration — still not wired)  
 3. Add an RPC URL (`LIVE_RPC_URL`), confirm slippage/fee reality, and gate with an explicit `PAPER_MODE=false` + second confirmation flag.  
 4. Start tiny; assume fills, latency, and rugs are worse than paper.
 
