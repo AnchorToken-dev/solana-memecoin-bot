@@ -1,7 +1,7 @@
 {
   "name": "solana-memecoin-bot",
   "version": "0.1.0",
-  "description": "Paper-mode Solana memecoin momentum trading bot (buy strength, trail take-profit). Simulation first — no live keys required.",
+  "description": "Paper-mode Solana memecoin momentum trading bot (buy strength, trail take-profit). Simulation first \u2014 no live keys required.",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -9,7 +9,9 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "paper": "PAPER_MODE=true tsx src/index.ts",
-    "test": "node --import tsx --test tests/risk.test.ts",
+    "api": "PAPER_MODE=true CONTROL_API=true tsx src/index.ts api",
+    "api:dev": "PAPER_MODE=true CONTROL_API=true tsx watch src/index.ts api",
+    "test": "node --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "engines": {
@@ -24,10 +26,14 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "cors": "^2.8.6",
     "dotenv": "^16.4.5",
+    "express": "^5.2.1",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/node": "^22.5.0",
     "tsx": "^4.19.0",
     "typescript": "^5.5.4"

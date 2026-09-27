@@ -3,13 +3,15 @@
   "bankrollUsd": 20,
   "maxOpenTrades": 1,
   "stopLossPct": 10,
+  "takeProfitPct": 25,
   "positionSizePct": 0.95,
   "momentum": {
     "minPct": 8,
     "windowMinutes": 5,
     "volumeSpikeMult": 2.0,
     "minLiquidityUsd": 15000,
-    "minVolume24hUsd": 25000
+    "minVolume24hUsd": 25000,
+    "minAgeMinutes": 3
   },
   "trailingTakeProfit": {
     "activatePct": 15,
@@ -24,6 +26,8 @@
     "scanLimit": 20,
     "maxCycles": 0
   },
+  "maxHoldMinutes": 20,
+  "dailyLossUsd": 5,
   "marketDataSource": "mock",
   "ledgerDir": "data"
 }

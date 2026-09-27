@@ -45,6 +45,17 @@ export class PaperLedger {
     return this.cashUsd;
   }
 
+  /** Session realized PnL (sum of closed paper sells). */
+  get realizedPnl(): number {
+    return this.realizedPnlUsd;
+  }
+
+  /** Most recent trades first. */
+  getTrades(limit = 50): TradeRecord[] {
+    const n = Math.max(0, Math.floor(limit));
+    return [...this.trades].reverse().slice(0, n);
+  }
+
   replacePosition(updated: Position): void {
     const i = this.positions.findIndex((p) => p.id === updated.id);
     if (i >= 0) this.positions[i] = updated;
@@ -100,6 +111,24 @@ export class PaperLedger {
       unrealizedPnlUsd: unrealized,
       tradeCount: this.trades.length,
     };
+  }
+
+  /**
+   * Clear session state for a fresh paper run: cash back to bankroll,
+   * no positions, zero realized PnL, empty in-memory trades, and rewrite
+   * trades.json / trades.csv (header only). Does not delete the ledger dir.
+   */
+  resetSession(bankrollUsd: number): void {
+    this.cashUsd = bankrollUsd;
+    this.positions = [];
+    this.realizedPnlUsd = 0;
+    this.trades = [];
+    writeFileSync(this.jsonPath, "[]\n");
+    writeFileSync(
+      this.csvPath,
+      "timestamp,side,symbol,mint,qty,price,notionalUsd,feesUsd,slippageUsd,reason,realizedPnlUsd,cashAfter\n",
+    );
+    log.info(`Paper ledger reset: cash=$${bankrollUsd.toFixed(2)}, trades cleared`);
   }
 
   private persist(rec: TradeRecord): void {

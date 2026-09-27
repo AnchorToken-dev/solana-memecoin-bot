@@ -1,0 +1,33 @@
+{
+  "paperMode": true,
+  "bankrollUsd": 20,
+  "maxOpenTrades": 1,
+  "stopLossPct": 10,
+  "takeProfitPct": 25,
+  "positionSizePct": 0.95,
+  "momentum": {
+    "minPct": 5,
+    "windowMinutes": 5,
+    "volumeSpikeMult": 2.0,
+    "minLiquidityUsd": 5000,
+    "minVolume24hUsd": 8000,
+    "minAgeMinutes": 3
+  },
+  "trailingTakeProfit": {
+    "activatePct": 10,
+    "distancePct": 7
+  },
+  "paperBroker": {
+    "slippageBps": 50,
+    "feeBps": 30
+  },
+  "runner": {
+    "pollIntervalMs": 15000,
+    "scanLimit": 20,
+    "maxCycles": 0
+  },
+  "maxHoldMinutes": 20,
+  "dailyLossUsd": 5,
+  "marketDataSource": "pumpfun",
+  "ledgerDir": "data"
+}

@@ -1,5 +1,6 @@
 import type { BotConfig, TokenSnapshot } from "../types.js";
 import { log } from "../logging.js";
+import { PumpFunMarketData } from "./pumpfun.js";
 
 export interface MarketDataProvider {
   /** Return candidate tokens for the momentum scan. */
@@ -76,6 +77,8 @@ export class MockMarketData implements MarketDataProvider {
         volume24hUsd: spiked ? 80_000 : 30_000,
         liquidityUsd: 40_000,
         timestamp: now,
+        // Mock tokens are "old enough" for MIN_AGE_MINUTES filters.
+        createdAt: now - 60 * 60_000,
       };
     });
   }
@@ -184,6 +187,27 @@ export class DexScreenerMarketData implements MarketDataProvider {
 }
 
 export function createMarketData(cfg: BotConfig): MarketDataProvider {
+  if (cfg.marketDataSource === "pumpfun") {
+    const dexFallback = process.env.PUMPFUN_DEXSCREENER_FALLBACK !== "false";
+    const dexEnrich = process.env.PUMPFUN_DEXSCREENER_ENRICH !== "false";
+    const apiBase =
+      process.env.PUMPFUN_API_BASE?.trim() ||
+      "https://frontend-api-v3.pump.fun";
+    log.info(
+      `Market data: Pump.fun frontend API (${apiBase})` +
+        `${dexEnrich ? " + DexScreener enrich" : ""}` +
+        `${dexFallback ? " + DexScreener pumpfun/pumpswap fallback" : ""}`,
+    );
+    log.info(
+      "Pump.fun endpoints are unofficial / may break; fills stay PAPER only.",
+    );
+    return new PumpFunMarketData({
+      apiBase,
+      dexFallback,
+      dexEnrich,
+      windowMinutes: cfg.momentum.windowMinutes,
+    });
+  }
   if (cfg.marketDataSource === "dexscreener") {
     log.info("Market data: DexScreener public API");
     return new DexScreenerMarketData();
@@ -191,3 +215,5 @@ export function createMarketData(cfg: BotConfig): MarketDataProvider {
   log.info("Market data: Mock (deterministic paper fixtures)");
   return new MockMarketData();
 }
+
+export { PumpFunMarketData } from "./pumpfun.js";
