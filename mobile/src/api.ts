@@ -60,7 +60,16 @@ export const api = {
         realizedPnlUsd: number;
         unrealizedPnlUsd: number;
         tradeCount: number;
-        openPositions: Array<Record<string, unknown>>;
+        /** Each open position includes mint + symbol for chart URLs. */
+        openPositions: Array<{
+          id?: string;
+          mint: string;
+          symbol: string;
+          qty: number;
+          entryPrice: number;
+          trailArmed?: boolean;
+          [key: string]: unknown;
+        }>;
       };
     }>("/portfolio"),
   trades: (limit = 40) =>

@@ -5,7 +5,7 @@ Style: **momentum** — buy short-window strength, manage with a **trailing take
 
 > **Not financial advice. No profit is promised.** Paper results do not predict live results. Memecoins can go to zero. This repo ships **dry-run by default** and does **not** require (or accept) live wallet private keys to run.
 
-The **engine stays on a laptop/server**. The optional **Android APK** is only a control UI (status, start/stop/reset/exit-now paper runner, bankroll/PnL, trades, API URL). No private keys in the app.
+The **engine stays on a laptop/server**. The optional **Android APK** is only a control UI (status, start/stop, PnL with exit-now/reset + live chart, trades, API URL). No private keys in the app.
 
 ## Specs (locked defaults)
 
@@ -40,8 +40,8 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 3. **Hard take-profit** — if unrealized gain ≥ `TAKE_PROFIT_PCT` (default `25`), sell (`take_profit`). `0` disables. Works alongside the trailing TP.
 4. **Time stop** — if held ≥ `MAX_HOLD_MINUTES`, sell (`time_stop`).
 5. **Trailing TP** — after unrealized gain ≥ `TRAIL_ACTIVATE_PCT`, arm a trail; sell if mark ≤ high-water × `(1 - TRAIL_DISTANCE_PCT/100)` (`trailing_take_profit`).
-6. **Manual exit** — `POST /runner/exit` (or `/position/exit`) / app **Exit now** flattens the open paper position at the current mark (`manual_exit`).
-7. **Daily loss cap** — when session realized PnL ≤ `−DAILY_LOSS_USD`, the runner stops (no new paper entries). **Start does not clear the ledger** — use `POST /runner/reset` (or Start with `?reset=1`) / the app **Reset** button to restore `BANKROLL_USD` cash and unlock another session.
+6. **Manual exit** — `POST /runner/exit` (or `/position/exit`) / app **Exit now** (PnL tab) flattens the open paper position at the current mark (`manual_exit`).
+7. **Daily loss cap** — when session realized PnL ≤ `−DAILY_LOSS_USD`, the runner stops (no new paper entries). **Start does not clear the ledger** — use `POST /runner/reset` (or Start with `?reset=1`) / the app **Reset** button on the **PnL** tab to restore `BANKROLL_USD` cash and unlock another session.
 
 ## Quick start (paper mode, Linux)
 
@@ -102,13 +102,13 @@ npm run api
 | POST | `/runner/start` | **PAPER_MODE only**. Optional `?reset=1` or JSON `{ "reset": true }` clears the paper session first |
 | POST | `/runner/stop` | Stop loop |
 | POST | `/runner/reset` | **PAPER_MODE only**: stop if running, rebuild ledger to `BANKROLL_USD`, clear `stopReason` / cycles, empty trades. Response includes `status` + `portfolio` |
-| GET | `/portfolio` | Bankroll / cash / equity / PnL / positions |
+| GET | `/portfolio` | Bankroll / cash / equity / PnL / positions (`openPositions[].mint` + `.symbol` for chart URLs) |
 | GET | `/config` | Public config (no secrets) |
 | GET | `/trades?limit=50` | Recent fills |
 
 CORS is open for local mobile / LAN browsers. Writes that start trading refuse unless `PAPER_MODE=true`. Live trading stays stubbed.
 
-**After a `daily_loss_cap` stop:** calling Start alone leaves realized PnL in the ledger, so the runner exits again on the next cycle. Hit **Reset** in the Android Run tab (confirm dialog) or `POST /runner/reset` first.
+**After a `daily_loss_cap` stop:** calling Start alone leaves realized PnL in the ledger, so the runner exits again on the next cycle. Hit **Reset** on the Android **PnL** tab (confirm dialog) or `POST /runner/reset` first.
 
 Other scripts:
 
@@ -141,7 +141,7 @@ Location: `mobile/` — Vite + Capacitor Android shell. **No wallet / no private
      find laptop IP (`ip -4 addr` or `hostname -I`)  
      then API URL `http://<laptop-lan-ip>:8787`  
      (allow port 8787 in the laptop firewall if needed)
-3. **Status** / **Run** / **PnL** / **Trades** tabs hit that API. Start / Stop / **Reset** paper session from **Run** (server must have `PAPER_MODE=true`). Reset clears the ledger and any `stopReason` (e.g. daily-loss lock).
+3. **Status** / **Run** / **PnL** / **Trades** tabs hit that API. **Start / Stop** on **Run**; **Exit now** / **Reset** on **PnL** (near equity / open position). Server must have `PAPER_MODE=true`. Reset clears the ledger and any `stopReason` (e.g. daily-loss lock). With an open position, **PnL** embeds a **DexScreener** live chart (`mint` from `/portfolio`); Pump.fun blocks iframes — use **Open on Pump.fun**. See `docs/pnl-chart.md`.
 
 ### Build a debug APK on Linux
 
@@ -232,6 +232,7 @@ mobile/               # Capacitor Android control UI
   android/            # Gradle project (assembleDebug → APK)
 tests/*.test.ts
 docs/pumpfun-market-data.md
+docs/pnl-chart.md      # PnL live chart: DexScreener embed; Pump.fun iframe blocked
 config/default.json
 config/pumpfun-preset.json
 .env.example
