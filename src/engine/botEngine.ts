@@ -1,0 +1,290 @@
+/**
+ * Controllable paper bot engine — start/stop from CLI or HTTP control API.
+ * Live trading remains stubbed; start() refuses unless PAPER_MODE=true.
+ */
+import type { BotConfig, PortfolioSnapshot, TokenSnapshot, TradeRecord } from "../types.js";
+import type { MarketDataProvider } from "../market/data.js";
+import { createMarketData } from "../market/data.js";
+import { PaperBroker } from "../broker/paper.js";
+import { PaperLedger } from "../ledger/ledger.js";
+import { evaluateEntries, evaluateExit } from "../strategy/momentum.js";
+import { sizePosition, canOpenAnother } from "../risk/manager.js";
+import { log } from "../logging.js";
+
+export type RunnerState = "stopped" | "starting" | "running" | "stopping";
+
+export interface EngineStatus {
+  state: RunnerState;
+  paperMode: boolean;
+  cycle: number;
+  startedAt: number | null;
+  stoppedAt: number | null;
+  uptimeMs: number;
+  lastError: string | null;
+  lastCycleAt: number | null;
+  marketDataSource: BotConfig["marketDataSource"];
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+      return;
+    }
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(t);
+        reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+      },
+      { once: true },
+    );
+  });
+}
+
+export class BotEngine {
+  readonly cfg: BotConfig;
+  readonly market: MarketDataProvider;
+  readonly broker: PaperBroker;
+  readonly ledger: PaperLedger;
+
+  private state: RunnerState = "stopped";
+  private cycle = 0;
+  private startedAt: number | null = null;
+  private stoppedAt: number | null = null;
+  private lastError: string | null = null;
+  private lastCycleAt: number | null = null;
+  private abort: AbortController | null = null;
+  private loopPromise: Promise<void> | null = null;
+
+  constructor(
+    cfg: BotConfig,
+    deps?: {
+      market?: MarketDataProvider;
+      broker?: PaperBroker;
+      ledger?: PaperLedger;
+    },
+  ) {
+    this.cfg = cfg;
+    this.market = deps?.market ?? createMarketData(cfg);
+    this.broker = deps?.broker ?? new PaperBroker(cfg);
+    this.ledger =
+      deps?.ledger ?? new PaperLedger(cfg.bankrollUsd, cfg.ledgerDir);
+  }
+
+  getStatus(): EngineStatus {
+    const now = Date.now();
+    return {
+      state: this.state,
+      paperMode: this.cfg.paperMode,
+      cycle: this.cycle,
+      startedAt: this.startedAt,
+      stoppedAt: this.stoppedAt,
+      uptimeMs:
+        this.startedAt != null && this.state === "running"
+          ? now - this.startedAt
+          : this.startedAt != null && this.stoppedAt != null
+            ? this.stoppedAt - this.startedAt
+            : 0,
+      lastError: this.lastError,
+      lastCycleAt: this.lastCycleAt,
+      marketDataSource: this.cfg.marketDataSource,
+    };
+  }
+
+  /** Public config — BotConfig has no secrets; wallet paths stay out of this object. */
+  getPublicConfig(): BotConfig {
+    return { ...this.cfg };
+  }
+
+  async getPortfolio(): Promise<PortfolioSnapshot> {
+    const marks = new Map<string, number>();
+    for (const p of this.ledger.openPositions) {
+      const px = await this.market.getPrice(p.mint);
+      if (px != null) marks.set(p.mint, px);
+    }
+    return this.ledger.snapshot(marks);
+  }
+
+  getTrades(limit = 50): TradeRecord[] {
+    return this.ledger.getTrades(limit);
+  }
+
+  /**
+   * Start the paper runner loop. Only allowed when PAPER_MODE=true.
+   * Idempotent if already running.
+   */
+  async start(): Promise<{ ok: boolean; message: string; status: EngineStatus }> {
+    if (!this.cfg.paperMode) {
+      return {
+        ok: false,
+        message:
+          "Refusing to start: PAPER_MODE is false. Live trading is stubbed; keep PAPER_MODE=true.",
+        status: this.getStatus(),
+      };
+    }
+    if (this.state === "running" || this.state === "starting") {
+      return {
+        ok: true,
+        message: "Runner already active",
+        status: this.getStatus(),
+      };
+    }
+    if (this.state === "stopping" && this.loopPromise) {
+      await this.loopPromise.catch(() => undefined);
+    }
+
+    this.state = "starting";
+    this.lastError = null;
+    this.abort = new AbortController();
+    this.startedAt = Date.now();
+    this.stoppedAt = null;
+    this.state = "running";
+    this.loopPromise = this.runLoop(this.abort.signal).finally(() => {
+      this.state = "stopped";
+      this.stoppedAt = Date.now();
+      this.abort = null;
+      this.loopPromise = null;
+    });
+
+    log.info("Paper runner started via engine");
+    return {
+      ok: true,
+      message: "Paper runner started",
+      status: this.getStatus(),
+    };
+  }
+
+  async stop(): Promise<{ ok: boolean; message: string; status: EngineStatus }> {
+    if (this.state === "stopped") {
+      return {
+        ok: true,
+        message: "Runner already stopped",
+        status: this.getStatus(),
+      };
+    }
+    this.state = "stopping";
+    this.abort?.abort();
+    if (this.loopPromise) {
+      await this.loopPromise.catch(() => undefined);
+    }
+    log.info("Paper runner stopped via engine");
+    return {
+      ok: true,
+      message: "Paper runner stopped",
+      status: this.getStatus(),
+    };
+  }
+
+  private async runLoop(signal: AbortSignal): Promise<void> {
+    const { cfg, market, ledger } = this;
+    log.info("Runner loop starting", {
+      paperMode: cfg.paperMode,
+      bankrollUsd: cfg.bankrollUsd,
+      maxOpenTrades: cfg.maxOpenTrades,
+      source: cfg.marketDataSource,
+    });
+
+    while (!signal.aborted) {
+      this.cycle += 1;
+      if (cfg.runner.maxCycles > 0 && this.cycle > cfg.runner.maxCycles) {
+        log.info(`Reached maxCycles=${cfg.runner.maxCycles}; stopping`);
+        break;
+      }
+
+      try {
+        await this.tick(this.cycle);
+        this.lastCycleAt = Date.now();
+      } catch (err) {
+        this.lastError = err instanceof Error ? err.message : String(err);
+        log.error("Cycle failed", err);
+      }
+
+      try {
+        await sleep(cfg.runner.pollIntervalMs, signal);
+      } catch (err) {
+        if ((err as { name?: string }).name === "AbortError") break;
+        throw err;
+      }
+    }
+
+    const marks = new Map<string, number>();
+    for (const p of ledger.openPositions) {
+      const px = await market.getPrice(p.mint);
+      if (px != null) marks.set(p.mint, px);
+    }
+    const snap = ledger.snapshot(marks);
+    log.info("Runner loop ended; portfolio", snap);
+  }
+
+  private async tick(cycle: number): Promise<void> {
+    const { cfg, market, broker, ledger } = this;
+    const snaps = await market.scan(cfg.runner.scanLimit);
+
+    for (const pos of ledger.openPositions) {
+      const mark = await markFor(pos.mint, snaps, market);
+      if (mark == null) {
+        log.warn(`No mark for ${pos.symbol}; skipping exit check`);
+        continue;
+      }
+      const { position: updated, exit } = evaluateExit(pos, mark, cfg);
+      ledger.replacePosition(updated);
+      if (exit) {
+        const { fill, proceedsUsd, realizedPnlUsd } = broker.applySell({
+          position: updated,
+          markPrice: exit.markPrice,
+          reason: exit.reason,
+        });
+        ledger.recordSell(fill, realizedPnlUsd, proceedsUsd);
+      }
+    }
+
+    if (!canOpenAnother(ledger.openPositions.length, cfg)) {
+      log.debug(`Cycle ${cycle}: at max open trades`);
+      return;
+    }
+
+    const openMints = new Set(ledger.openPositions.map((p) => p.mint));
+    const entries = evaluateEntries(snaps, cfg, openMints);
+
+    if (entries.length === 0) {
+      log.debug(`Cycle ${cycle}: no entry signals (${snaps.length} scanned)`);
+      return;
+    }
+
+    const entry = entries[0]!;
+    const sized = sizePosition(
+      {
+        cashUsd: ledger.cash,
+        markPrice: entry.priceUsd,
+        openCount: ledger.openPositions.length,
+      },
+      cfg,
+    );
+
+    if (!sized.ok) {
+      log.info(`Skip entry ${entry.symbol}: ${sized.reason}`);
+      return;
+    }
+
+    const { fill, position } = broker.applyBuy({
+      mint: entry.mint,
+      symbol: entry.symbol,
+      markPrice: entry.priceUsd,
+      notionalUsd: sized.notionalUsd,
+    });
+    ledger.recordBuy(fill, position);
+    log.info(`Entry signal: ${entry.reason}`);
+  }
+}
+
+async function markFor(
+  mint: string,
+  snaps: TokenSnapshot[],
+  market: MarketDataProvider,
+): Promise<number | null> {
+  const fromScan = snaps.find((s) => s.mint === mint);
+  if (fromScan) return fromScan.priceUsd;
+  return market.getPrice(mint);
+}

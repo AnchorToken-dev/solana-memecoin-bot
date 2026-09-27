@@ -45,6 +45,12 @@ export class PaperLedger {
     return this.cashUsd;
   }
 
+  /** Most recent trades first. */
+  getTrades(limit = 50): TradeRecord[] {
+    const n = Math.max(0, Math.floor(limit));
+    return [...this.trades].reverse().slice(0, n);
+  }
+
   replacePosition(updated: Position): void {
     const i = this.positions.findIndex((p) => p.id === updated.id);
     if (i >= 0) this.positions[i] = updated;

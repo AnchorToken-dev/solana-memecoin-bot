@@ -15,3 +15,16 @@ coverage/
 id.json
 keypair*.json
 wallet*.json
+
+# Mobile / Android
+mobile/node_modules/
+mobile/dist/
+mobile/android/.gradle/
+mobile/android/app/build/
+mobile/android/build/
+mobile/android/local.properties
+mobile/android/captures/
+*.apk
+*.aab
+*.keystore
+*.jks
