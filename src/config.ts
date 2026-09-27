@@ -44,6 +44,7 @@ const ConfigSchema = z.object({
   marketDataSource: z.enum(["mock", "dexscreener", "pumpfun"]),
   ledgerDir: z.string().min(1),
   activePreset: z.enum(["momentum", "sniper", "custom"]),
+  requireChecklistGo: z.boolean(),
 });
 
 /** Paper-safe knobs allowed on PATCH /config. */
@@ -65,6 +66,8 @@ export const PaperPatchSchema = z
       .optional(),
     /** Optional; usually set via POST /config/preset. */
     activePreset: z.enum(["momentum", "sniper", "custom"]).optional(),
+    /** Gate paper entries on a GO checklist for the mint (default off / advisory). */
+    requireChecklistGo: z.boolean().optional(),
   })
   .strict();
 
@@ -207,6 +210,7 @@ export function overlayFromConfig(cfg: BotConfig): RuntimeOverlay {
       scanLimit: cfg.runner.scanLimit,
     },
     activePreset: cfg.activePreset,
+    requireChecklistGo: cfg.requireChecklistGo,
   };
 }
 
@@ -240,6 +244,9 @@ function applyOverlay(cfg: BotConfig, overlay: RuntimeOverlay): void {
   }
   if (overlay.activePreset) {
     cfg.activePreset = overlay.activePreset;
+  }
+  if (overlay.requireChecklistGo != null) {
+    cfg.requireChecklistGo = overlay.requireChecklistGo;
   }
 }
 
@@ -341,10 +348,24 @@ export function applyPaperPatch(cfg: BotConfig, patch: PaperConfigPatch): void {
       cfg.runner.scanLimit = patch.runner.scanLimit;
     }
   }
+  if (patch.requireChecklistGo != null) {
+    cfg.requireChecklistGo = patch.requireChecklistGo;
+  }
   if (patch.activePreset) {
     cfg.activePreset = patch.activePreset;
   } else {
-    cfg.activePreset = "custom";
+    // Don't mark custom for a lone requireChecklistGo toggle (advisory gate).
+    const knobsChanged =
+      patch.bankrollUsd != null ||
+      patch.stopLossPct != null ||
+      patch.takeProfitPct != null ||
+      patch.positionSizePct != null ||
+      patch.maxHoldMinutes != null ||
+      patch.dailyLossUsd != null ||
+      patch.momentum != null ||
+      patch.trailingTakeProfit != null ||
+      patch.runner != null;
+    if (knobsChanged) cfg.activePreset = "custom";
   }
 }
 
@@ -423,6 +444,10 @@ export function loadConfig(opts?: {
     ledgerDir: envStr("LEDGER_DIR", file.ledgerDir ?? "data"),
     activePreset:
       (file.activePreset as ActivePreset | undefined) ?? "custom",
+    requireChecklistGo: envBool(
+      "REQUIRE_CHECKLIST_GO",
+      file.requireChecklistGo ?? false,
+    ),
   };
 
   if (!opts?.skipRuntimeOverlay) {

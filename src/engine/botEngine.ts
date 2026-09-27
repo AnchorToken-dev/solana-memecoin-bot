@@ -27,6 +27,7 @@ import {
   type PresetName,
 } from "../presets.js";
 import { TradeJournal, type JournalEntry } from "../journal/journal.js";
+import { ResearchChecklistStore } from "../checklist/checklist.js";
 import {
   SessionEventBus,
   exitEventType,
@@ -85,6 +86,7 @@ export class BotEngine {
   readonly broker: PaperBroker;
   readonly ledger: PaperLedger;
   readonly journal: TradeJournal;
+  readonly checklist: ResearchChecklistStore;
   readonly events: SessionEventBus;
 
   private state: RunnerState = "stopped";
@@ -107,6 +109,7 @@ export class BotEngine {
       broker?: PaperBroker;
       ledger?: PaperLedger;
       journal?: TradeJournal;
+      checklist?: ResearchChecklistStore;
       events?: SessionEventBus;
       /** Absolute or relative path for runtime-config.json persistence. */
       runtimeConfigPath?: string;
@@ -119,6 +122,8 @@ export class BotEngine {
       deps?.ledger ?? new PaperLedger(cfg.bankrollUsd, cfg.ledgerDir);
     this.journal =
       deps?.journal ?? new TradeJournal(cfg.ledgerDir);
+    this.checklist =
+      deps?.checklist ?? new ResearchChecklistStore(cfg.ledgerDir);
     this.events = deps?.events ?? new SessionEventBus();
     this.runtimeConfigPath = deps?.runtimeConfigPath;
   }
@@ -290,6 +295,50 @@ export class BotEngine {
 
   clearJournal() {
     return this.journal.clear();
+  }
+
+  getChecklist(opts?: { limit?: number; offset?: number; mint?: string }) {
+    return this.checklist.list(opts);
+  }
+
+  getChecklistById(id: string) {
+    return this.checklist.getById(id);
+  }
+
+  getChecklistTemplate() {
+    return this.checklist.template();
+  }
+
+  createChecklist(body: unknown) {
+    if (body == null || typeof body !== "object" || Array.isArray(body)) {
+      return { ok: false as const, message: "Body must be a JSON object" };
+    }
+    return this.checklist.create(body as {
+      mint: string;
+      symbol?: string;
+      link?: string;
+      items?: unknown;
+      thesis?: string;
+      invalidation?: string;
+    });
+  }
+
+  updateChecklist(id: string, body: unknown) {
+    if (body == null || typeof body !== "object" || Array.isArray(body)) {
+      return { ok: false as const, message: "Body must be a JSON object" };
+    }
+    return this.checklist.update(id, body as {
+      mint?: string;
+      symbol?: string;
+      link?: string;
+      items?: unknown;
+      thesis?: string;
+      invalidation?: string;
+    });
+  }
+
+  clearChecklists() {
+    return this.checklist.clear();
   }
 
   getAlerts(sinceMs = 0, limit = 50) {
@@ -725,6 +774,13 @@ export class BotEngine {
 
     if (!sized.ok) {
       log.info(`Skip entry ${entry.symbol}: ${sized.reason}`);
+      return false;
+    }
+
+    if (cfg.requireChecklistGo && !this.checklist.hasGoForMint(entry.mint)) {
+      log.info(
+        `Skip entry ${entry.symbol}: requireChecklistGo — no GO checklist for mint`,
+      );
       return false;
     }
 

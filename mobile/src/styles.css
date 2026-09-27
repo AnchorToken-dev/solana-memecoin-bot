@@ -35,7 +35,7 @@ header p { margin: 0; color: var(--muted); font-size: 0.85rem; }
 }
 nav.tabs {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 6px;
   position: fixed;
   left: 0; right: 0; bottom: 0;
@@ -51,7 +51,7 @@ nav.tabs button {
   color: var(--muted);
   border-radius: 10px;
   padding: 10px 4px;
-  font-size: 0.7rem;
+  font-size: 0.62rem;
 }
 nav.tabs button.active {
   color: var(--text);
@@ -201,3 +201,79 @@ input[type="number"] {
   font-weight: 600;
 }
 .toggle input { width: 18px; height: 18px; }
+
+textarea {
+  width: 100%;
+  padding: 10px 12px;
+  margin-top: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #0f172a;
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+.verdict-banner {
+  text-align: center;
+  font-size: 1.6rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  padding: 14px;
+  border-radius: 12px;
+  margin: 10px 0 14px;
+  border: 2px solid var(--border);
+}
+.verdict-go {
+  background: #064e3b;
+  color: var(--accent);
+  border-color: #10b981;
+}
+.verdict-nogo {
+  background: #4c0519;
+  color: var(--danger);
+  border-color: #fb7185;
+}
+.verdict-incomplete {
+  background: #1e293b;
+  color: var(--warn);
+  border-color: #fbbf24;
+}
+.check-row {
+  border-top: 1px solid var(--border);
+  padding: 10px 0;
+}
+.check-row:first-child { border-top: 0; }
+.check-label {
+  font-size: 0.8rem;
+  margin-bottom: 8px;
+  line-height: 1.35;
+}
+.check-btns {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 6px;
+}
+.check-btn {
+  border: 1px solid var(--border);
+  background: var(--btn2);
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 8px 4px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.check-btn.active-pass {
+  background: #064e3b;
+  color: var(--accent);
+  border-color: #10b981;
+}
+.check-btn.active-fail {
+  background: #4c0519;
+  color: var(--danger);
+  border-color: #fb7185;
+}
+.check-btn.active-skip {
+  background: #334155;
+  color: var(--warn);
+  border-color: #fbbf24;
+}

@@ -148,6 +148,76 @@ export const api = {
     request<{ ok: boolean; cleared: number; message: string }>("/journal", {
       method: "DELETE",
     }),
+  checklistTemplate: () =>
+    request<{
+      items: Array<{
+        id: string;
+        label: string;
+        required: boolean;
+        status: "pass" | "fail" | "skip" | "unset";
+      }>;
+      thesis: string;
+      invalidation: string;
+      verdict: "GO" | "NO-GO" | "INCOMPLETE";
+    }>("/checklist/template"),
+  checklist: (limit = 30, offset = 0, mint?: string) =>
+    request<{
+      entries: Array<{
+        id: string;
+        timestamp: number;
+        mint: string;
+        symbol: string;
+        link: string;
+        items: Array<{
+          id: string;
+          label: string;
+          required: boolean;
+          status: string;
+        }>;
+        thesis: string;
+        invalidation: string;
+        verdict: "GO" | "NO-GO" | "INCOMPLETE";
+      }>;
+      total: number;
+      limit: number;
+      offset: number;
+    }>(
+      `/checklist?limit=${limit}&offset=${offset}${
+        mint ? `&mint=${encodeURIComponent(mint)}` : ""
+      }`,
+    ),
+  createChecklist: (body: Record<string, unknown>) =>
+    request<{
+      ok: boolean;
+      entry: {
+        id: string;
+        verdict: "GO" | "NO-GO" | "INCOMPLETE";
+        mint: string;
+        symbol: string;
+        timestamp: number;
+      };
+      message?: string;
+    }>("/checklist", { method: "POST", body: JSON.stringify(body) }),
+  getChecklist: (id: string) =>
+    request<{
+      ok: boolean;
+      entry: {
+        id: string;
+        timestamp: number;
+        mint: string;
+        symbol: string;
+        link: string;
+        items: Array<{
+          id: string;
+          label: string;
+          required: boolean;
+          status: string;
+        }>;
+        thesis: string;
+        invalidation: string;
+        verdict: "GO" | "NO-GO" | "INCOMPLETE";
+      };
+    }>(`/checklist/${encodeURIComponent(id)}`),
   alerts: (since = 0, limit = 50) =>
     request<{
       events: Array<{

@@ -23,7 +23,7 @@ export function createControlApp(engine: BotEngine) {
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     }),
   );
-  app.use(express.json({ limit: "32kb" }));
+  app.use(express.json({ limit: "64kb" }));
 
   app.get("/health", (_req, res) => {
     res.json({
@@ -217,6 +217,76 @@ export function createControlApp(engine: BotEngine) {
       ? Math.min(Math.max(1, Math.floor(limitRaw)), 100)
       : 50;
     res.json(engine.getAlerts(since, limit));
+  });
+
+
+  /**
+   * Research go/no-go checklist (human research half). Survives /runner/reset.
+   * Advisory by default — does NOT auto-block paper entries unless
+   * config.requireChecklistGo=true (Settings toggle, default OFF).
+   */
+  app.get("/checklist/template", (_req, res) => {
+    res.json(engine.getChecklistTemplate());
+  });
+
+  app.get("/checklist", (req, res) => {
+    const limitRaw = Number(req.query.limit ?? 50);
+    const offsetRaw = Number(req.query.offset ?? 0);
+    const limit = Number.isFinite(limitRaw)
+      ? Math.min(Math.max(1, Math.floor(limitRaw)), 500)
+      : 50;
+    const offset = Number.isFinite(offsetRaw)
+      ? Math.max(0, Math.floor(offsetRaw))
+      : 0;
+    const mint =
+      typeof req.query.mint === "string" ? req.query.mint : undefined;
+    res.json(engine.getChecklist({ limit, offset, mint }));
+  });
+
+  app.get("/checklist/:id", (req, res) => {
+    const id = String(req.params.id ?? "");
+    const entry = engine.getChecklistById(id);
+    if (!entry) {
+      res.status(404).json({ ok: false, message: `Checklist not found: ${id}` });
+      return;
+    }
+    res.json({ ok: true, entry });
+  });
+
+  app.post("/checklist", (req, res) => {
+    const result = engine.createChecklist(req.body);
+    if (!result.ok) {
+      res.status(400).json(result);
+      return;
+    }
+    res.status(201).json(result);
+  });
+
+  app.patch("/checklist/:id", (req, res) => {
+    const id = String(req.params.id ?? "");
+    const result = engine.updateChecklist(id, req.body);
+    if (!result.ok) {
+      const status = result.message.startsWith("Checklist not found") ? 404 : 400;
+      res.status(status).json(result);
+      return;
+    }
+    res.status(200).json(result);
+  });
+
+  app.delete("/checklist", (_req, res) => {
+    if (!engine.cfg.paperMode) {
+      res.status(403).json({
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing checklist clear while live mode is configured.",
+      });
+      return;
+    }
+    const result = engine.clearChecklists();
+    res.status(200).json({
+      ...result,
+      message: `Cleared ${result.cleared} checklists`,
+    });
   });
 
   app.get("/journal", (req, res) => {
