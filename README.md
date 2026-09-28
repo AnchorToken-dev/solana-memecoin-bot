@@ -39,7 +39,7 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 
 **Session risk is sticky:** applying Momentum or Sniper changes strategy knobs (stops, trail, TP, poll, liq/vol, min age, hold) but **preserves** current `bankrollUsd`, `dailyLossUsd`, `maxPositionUsd`, and `chaseLockoutHours` (e.g. Mark’s $100 / $25 daily loss / $25 max position / 12h chase lockout). Edit those via PATCH `/config` or Settings Save.
 
-**Vault / skim:** move paper profit into `vaultUsd` (`POST /vault/skim`) so sizing cannot use it. **Vault survives `/runner/reset`** (like journal). See [docs/vault-max-position.md](docs/vault-max-position.md).
+**Vault / skim:** move paper profit into `vaultUsd` (`POST /vault/skim`) so sizing cannot use it. **Vault survives `/runner/reset`** (like journal). See [docs/vault-max-position.md](docs/vault-max-position.md). Journal P&L rollups: [docs/journal-pnl-summary.md](docs/journal-pnl-summary.md).
 
 
 In-app / API presets for paper research. Apply via **Settings** tab or `POST /config/preset`. Requires the runner **stopped**. Values persist in `data/runtime-config.json` (overlay wins over file/env on restart).
@@ -144,7 +144,7 @@ npm run api
 | PATCH / PUT | `/config` | **PAPER_MODE only**: update paper knobs (bankroll, max position, stops, trail, TP, momentum filters, min age, max hold, daily loss, poll). Persists `data/runtime-config.json`. **409** if runner running — stop first. Rejects `paperMode` / wallet / live fields |
 | POST | `/config/preset` | Body `{ "preset": "momentum" \| "sniper" }` — apply named preset + persist. **409** if runner running |
 | GET | `/trades?limit=50` | Recent fills (session ledger; cleared by Reset) |
-| GET | `/journal?limit=&offset=` | **Trade journal** — closed paper trades newest first with **mint/CA** (survives Reset; old rows backfill mint from fills when possible) |
+| GET | `/journal?limit=&offset=` | **Trade journal** — closed paper trades newest first with **mint/CA** + **Daily/Weekly/Monthly/Overall P&L** (USD + SOL/`quoteAsset`; America/New_York periods; survives Reset) |
 | PATCH | `/journal/:id` | Body `{ "note": "…" }` — edit learning note |
 | DELETE | `/journal` | Explicit journal clear only (Reset does **not** clear journal) |
 | GET | `/alerts?since=` | Session events for phone local notifications (start/stop/open/close/daily loss) |

@@ -23,6 +23,21 @@ function money(n: unknown): string {
   return `$${x.toFixed(2)}`;
 }
 
+/** Format quote-asset amount (SOL etc.) with ticker label. */
+function quoteAmt(n: unknown, asset = "SOL"): string {
+  const x = typeof n === "number" ? n : Number(n);
+  if (!Number.isFinite(x)) return "—";
+  const abs = Math.abs(x);
+  const digits = abs >= 100 ? 2 : abs >= 1 ? 4 : 6;
+  return `${x.toFixed(digits)} ${asset}`;
+}
+
+function dualPnl(usd: number, quote: number | null | undefined, asset: string): string {
+  const u = money(usd);
+  if (quote == null || !Number.isFinite(quote)) return u;
+  return `${u} · ${quoteAmt(quote, asset)}`;
+}
+
 function fmtTs(n: unknown): string {
   if (typeof n !== "number" || !n) return "—";
   return new Date(n).toLocaleString();
@@ -564,23 +579,63 @@ async function paintJournal(main: Element) {
 
   const data = await api.journal(50, 0);
   const entries = data.entries ?? [];
+  const summary = data.summary;
+  const quoteAsset = summary?.quoteAsset ?? "SOL";
+  const tz = summary?.timezone ?? "America/New_York";
+  const estRate = summary?.estimateQuoteUsdRate;
+  const periods = summary?.periods ?? [];
+  const summaryCard =
+    periods.length > 0
+      ? `<div class="card journal-summary">
+      <h2>P&amp;L summary</h2>
+      <p class="muted">Calendar periods in <strong>${escapeHtml(tz)}</strong>. Amounts in USD and ${escapeHtml(quoteAsset)}. ${
+        estRate != null
+          ? `Estimate rate ≈ $${Number(estRate).toFixed(2)}/${escapeHtml(quoteAsset)} for rows without a fill-time rate.`
+          : "Quote amounts use fill-time rate when recorded."
+      }</p>
+      <div class="summary-grid">
+        ${periods
+          .map((p) => {
+            const cls = p.pnlUsd >= 0 ? "pnl-pos" : "pnl-neg";
+            const q =
+              p.pnlQuote != null && Number.isFinite(p.pnlQuote)
+                ? quoteAmt(p.pnlQuote, p.quoteAsset || quoteAsset)
+                : "—";
+            const basis =
+              p.quoteBasis && p.quoteBasis !== "recorded"
+                ? ` <span class="muted">(${escapeHtml(p.quoteBasis)})</span>`
+                : "";
+            return `<div class="summary-cell">
+              <div class="summary-label">${escapeHtml(p.label)}</div>
+              <div class="${cls}">${money(p.pnlUsd)}</div>
+              <div class="muted">${escapeHtml(q)}${basis}</div>
+              <div class="muted">${p.tradeCount} trade${p.tradeCount === 1 ? "" : "s"} · ${p.winCount}W/${p.lossCount}L</div>
+            </div>`;
+          })
+          .join("")}
+      </div>
+    </div>`
+      : "";
   main.innerHTML = `
+    ${summaryCard}
     <div class="card">
       <h2>Trade journal</h2>
-      <p class="muted">Closed paper trades with notes + mint/CA. Survives session <strong>Reset</strong> — clear only via button below. Same-named coins are distinguished by CA; open DexScreener from each row.</p>
+      <p class="muted">Closed paper trades with notes + mint/CA. Survives session <strong>Reset</strong> — clear only via button below. Same-named coins are distinguished by CA; open DexScreener from each row. PnL shown in USD + ${escapeHtml(quoteAsset)}.</p>
       <div class="row"><span class="k">Entries</span><span class="v">${escapeHtml(String(data.total))}</span></div>
       ${
         entries.length === 0
           ? `<p class="muted">No closed trades yet. Exits (stop / TP / trail / manual / time) appear here.</p>`
           : entries.map((e) => {
               const pnlClass = e.pnlUsd >= 0 ? "pnl-pos" : "pnl-neg";
+              const asset = (e.quoteAsset || quoteAsset || "SOL").toUpperCase();
+              const chain = (e.chainId || "solana").toLowerCase();
               const notePreview = e.note?.trim()
                 ? escapeHtml(e.note.trim().slice(0, 80))
                 : `<span class="muted">Tap note to add</span>`;
               const mint = typeof e.mint === "string" ? e.mint.trim() : "";
               const mintShort = truncateMint(mint);
               const dexUrl = mint
-                ? `https://dexscreener.com/solana/${encodeURIComponent(mint)}`
+                ? `https://dexscreener.com/${encodeURIComponent(chain)}/${encodeURIComponent(mint)}`
                 : "";
               const mintBlock = mint
                 ? `<div class="journal-mint">
@@ -590,13 +645,21 @@ async function paintJournal(main: Element) {
                     <a class="linkish" href="${escapeAttr(dexUrl)}" target="_blank" rel="noopener noreferrer">DexScreener</a>
                   </div>`
                 : `<div class="journal-mint muted">CA unavailable (old row; will backfill from fills when possible)</div>`;
+              const sizeDual =
+                e.sizeQuote != null && Number.isFinite(e.sizeQuote)
+                  ? `${money(e.sizeUsd)} · ${quoteAmt(e.sizeQuote, asset)}`
+                  : money(e.sizeUsd);
+              const basisHint =
+                e.quoteBasis && e.quoteBasis !== "recorded"
+                  ? ` · <span class="muted">${escapeHtml(e.quoteBasis)}</span>`
+                  : "";
               return `<div class="journal-row" data-jid="${escapeAttr(e.id)}">
                 <div class="journal-top">
                   <strong>${escapeHtml(e.symbol || mintShort || "—")}</strong>
-                  <span class="${pnlClass}">${money(e.pnlUsd)} (${e.pnlPct >= 0 ? "+" : ""}${e.pnlPct.toFixed(1)}%)</span>
+                  <span class="${pnlClass}">${dualPnl(e.pnlUsd, e.pnlQuote, asset)} (${e.pnlPct >= 0 ? "+" : ""}${e.pnlPct.toFixed(1)}%)</span>
                 </div>
                 <div class="muted">${fmtTs(e.timestamp)} · ${escapeHtml(e.exitReason)}
-                · size ${money(e.sizeUsd)}
+                · size ${sizeDual}${basisHint}
                 · ${escapeHtml(String(e.entryPrice))} → ${escapeHtml(String(e.exitPrice))}</div>
                 ${mintBlock}
                 <button type="button" class="journal-note-btn" data-jid="${escapeAttr(e.id)}" data-note="${escapeAttr(e.note ?? "")}">${notePreview}</button>

@@ -348,16 +348,21 @@ export function createControlApp(engine: BotEngine) {
     });
   });
 
-  app.get("/journal", (req, res) => {
-    const limitRaw = Number(req.query.limit ?? 50);
-    const offsetRaw = Number(req.query.offset ?? 0);
-    const limit = Number.isFinite(limitRaw)
-      ? Math.min(Math.max(1, Math.floor(limitRaw)), 500)
-      : 50;
-    const offset = Number.isFinite(offsetRaw)
-      ? Math.max(0, Math.floor(offsetRaw))
-      : 0;
-    res.json(engine.getJournal({ limit, offset }));
+  app.get("/journal", async (req, res, next) => {
+    try {
+      const limitRaw = Number(req.query.limit ?? 50);
+      const offsetRaw = Number(req.query.offset ?? 0);
+      const limit = Number.isFinite(limitRaw)
+        ? Math.min(Math.max(1, Math.floor(limitRaw)), 500)
+        : 50;
+      const offset = Number.isFinite(offsetRaw)
+        ? Math.max(0, Math.floor(offsetRaw))
+        : 0;
+      // Includes Daily/Weekly/Monthly/Overall P&L summary (USD + quote asset).
+      res.json(await engine.getJournal({ limit, offset }));
+    } catch (err) {
+      next(err);
+    }
   });
 
   /** Update free-text learning note on a journal entry. */
