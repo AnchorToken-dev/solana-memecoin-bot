@@ -263,10 +263,11 @@ export class BotEngine {
       path,
       bankrollUsd: this.cfg.bankrollUsd,
       dailyLossUsd: this.cfg.dailyLossUsd,
+      maxPositionUsd: this.cfg.maxPositionUsd,
     });
     return {
       ok: true,
-      message: `Preset "${preset}" applied and saved to ${path} (bankroll $${this.cfg.bankrollUsd} / daily loss $${this.cfg.dailyLossUsd} kept sticky)`,
+      message: `Preset "${preset}" applied and saved to ${path} (bankroll $${this.cfg.bankrollUsd} / daily loss $${this.cfg.dailyLossUsd} / max position $${this.cfg.maxPositionUsd} kept sticky)`,
       status: this.getStatus(),
       config: this.getPublicConfig(),
     };
@@ -295,6 +296,150 @@ export class BotEngine {
 
   clearJournal() {
     return this.journal.clear();
+  }
+
+  /**
+   * Skim tradable cash into the vault (locked out of sizing).
+   * - amountUsd: absolute skim, capped to available cash
+   * - percentOfProfit: skim % of max(0, cash − bankrollUsd) — cash profit
+   *   above the configured bankroll floor (ignores open-position MTM)
+   * PAPER_MODE only. Allowed while running (cash move only; no strategy change).
+   */
+  skimToVault(body: unknown): {
+    ok: boolean;
+    message: string;
+    status: EngineStatus;
+    portfolio?: PortfolioSnapshot;
+    skimmedUsd?: number;
+  } {
+    if (!this.cfg.paperMode) {
+      return {
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing vault skim while live mode is configured (live is stubbed).",
+        status: this.getStatus(),
+      };
+    }
+    if (body == null || typeof body !== "object" || Array.isArray(body)) {
+      return {
+        ok: false,
+        message: 'Body must be { "amountUsd": number } or { "percentOfProfit": number }',
+        status: this.getStatus(),
+      };
+    }
+    const obj = body as { amountUsd?: unknown; percentOfProfit?: unknown };
+    const hasAmount = obj.amountUsd != null;
+    const hasPct = obj.percentOfProfit != null;
+    if (hasAmount === hasPct) {
+      return {
+        ok: false,
+        message: "Provide exactly one of amountUsd or percentOfProfit",
+        status: this.getStatus(),
+      };
+    }
+
+    let amount = 0;
+    if (hasAmount) {
+      amount = Number(obj.amountUsd);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return {
+          ok: false,
+          message: "amountUsd must be a positive number",
+          status: this.getStatus(),
+        };
+      }
+    } else {
+      const pct = Number(obj.percentOfProfit);
+      if (!Number.isFinite(pct) || pct <= 0 || pct > 100) {
+        return {
+          ok: false,
+          message: "percentOfProfit must be in (0, 100]",
+          status: this.getStatus(),
+        };
+      }
+      // Profit above bankroll floor from available cash (not open MTM).
+      const profitAboveFloor = Math.max(0, this.ledger.cash - this.cfg.bankrollUsd);
+      amount = (profitAboveFloor * pct) / 100;
+      if (amount < 0.01) {
+        return {
+          ok: false,
+          message: `No skimable profit above bankroll floor ($${this.cfg.bankrollUsd.toFixed(2)}); cash=$${this.ledger.cash.toFixed(2)}`,
+          status: this.getStatus(),
+          portfolio: this.ledger.snapshot(new Map()),
+        };
+      }
+    }
+
+    const result = this.ledger.skim(amount);
+    const portfolio = this.ledger.snapshot(new Map());
+    if (!result.ok) {
+      return {
+        ok: false,
+        message: result.message,
+        status: this.getStatus(),
+        portfolio,
+      };
+    }
+    return {
+      ok: true,
+      message: result.message,
+      status: this.getStatus(),
+      portfolio,
+      skimmedUsd: result.skimmedUsd,
+    };
+  }
+
+  /**
+   * Return USD from vault back to tradable cash (paper convenience).
+   * PAPER_MODE only.
+   */
+  returnFromVault(body: unknown): {
+    ok: boolean;
+    message: string;
+    status: EngineStatus;
+    portfolio?: PortfolioSnapshot;
+    returnedUsd?: number;
+  } {
+    if (!this.cfg.paperMode) {
+      return {
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing vault return while live mode is configured (live is stubbed).",
+        status: this.getStatus(),
+      };
+    }
+    if (body == null || typeof body !== "object" || Array.isArray(body)) {
+      return {
+        ok: false,
+        message: 'Body must be { "amountUsd": number }',
+        status: this.getStatus(),
+      };
+    }
+    const amount = Number((body as { amountUsd?: unknown }).amountUsd);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return {
+        ok: false,
+        message: "amountUsd must be a positive number",
+        status: this.getStatus(),
+      };
+    }
+    const result = this.ledger.returnFromVault(amount);
+    const portfolio = this.ledger.snapshot(new Map());
+    if (!result.ok) {
+      return {
+        ok: false,
+        message: result.message,
+        status: this.getStatus(),
+        portfolio,
+      };
+    }
+    return {
+      ok: true,
+      message: result.message,
+      status: this.getStatus(),
+      portfolio,
+      returnedUsd: result.returnedUsd,
+    };
   }
 
   getChecklist(opts?: { limit?: number; offset?: number; mint?: string }) {
@@ -484,6 +629,7 @@ export class BotEngine {
    * PAPER_MODE only: stop the runner if needed, rebuild the paper ledger to
    * BANKROLL_USD cash (flat, zero realized PnL, empty trades on disk), clear
    * stopReason / cycle counters. Unlocks start after a daily_loss_cap halt.
+   * Vault (skimmedUsd) is NOT cleared — survives like journal / checklists.
    */
   async reset(): Promise<{
     ok: boolean;
@@ -517,11 +663,12 @@ export class BotEngine {
     const portfolio = await this.getPortfolio();
     log.info("Paper session reset", {
       cashUsd: portfolio.cashUsd,
+      vaultUsd: portfolio.vaultUsd,
       tradeCount: portfolio.tradeCount,
     });
     return {
       ok: true,
-      message: `Paper session reset to $${this.cfg.bankrollUsd.toFixed(2)} bankroll`,
+      message: `Paper session reset to $${this.cfg.bankrollUsd.toFixed(2)} bankroll (vault $${portfolio.vaultUsd.toFixed(2)} kept)`,
       status: this.getStatus(),
       portfolio,
     };
@@ -762,6 +909,7 @@ export class BotEngine {
     }
 
     const entry = entries[0]!;
+    // Size off tradable cash only — vault is excluded from ledger.cash after skim.
     const sized = sizePosition(
       {
         cashUsd: ledger.cash,

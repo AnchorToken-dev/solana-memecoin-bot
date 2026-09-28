@@ -18,7 +18,8 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 | Hard take-profit | `+25%` from entry | `TAKE_PROFIT_PCT` (0 = off) |
 | Max hold (time stop) | `20` minutes | `MAX_HOLD_MINUTES` (0 = off) |
 | Daily loss cap | `$5` realized | `DAILY_LOSS_USD` (0 = off; stops runner) |
-| Position size | `95%` of cash | `POSITION_SIZE_PCT` |
+| Position size | `95%` of **tradable** cash | `POSITION_SIZE_PCT` |
+| Max position (hard) | `$25` per open trade | `MAX_POSITION_USD` (0 = off; sticky) |
 | Momentum window | `5` minutes | `MOMENTUM_WINDOW_MINUTES` |
 | Min window change | `+8%` | `MOMENTUM_MIN_PCT` |
 | Volume spike | `2.0×` avg | `VOLUME_SPIKE_MULT` |
@@ -35,7 +36,9 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 
 ### Named presets (Momentum | Sniper)
 
-**Session risk is sticky:** applying Momentum or Sniper changes strategy knobs (stops, trail, TP, poll, liq/vol, min age, hold) but **preserves** current `bankrollUsd` and `dailyLossUsd` (e.g. Mark’s $100 / $25). Edit those via PATCH `/config` or Settings Save.
+**Session risk is sticky:** applying Momentum or Sniper changes strategy knobs (stops, trail, TP, poll, liq/vol, min age, hold) but **preserves** current `bankrollUsd`, `dailyLossUsd`, and `maxPositionUsd` (e.g. Mark’s $100 / $25 daily loss / $25 max position). Edit those via PATCH `/config` or Settings Save.
+
+**Vault / skim:** move paper profit into `vaultUsd` (`POST /vault/skim`) so sizing cannot use it. **Vault survives `/runner/reset`** (like journal). See [docs/vault-max-position.md](docs/vault-max-position.md).
 
 
 In-app / API presets for paper research. Apply via **Settings** tab or `POST /config/preset`. Requires the runner **stopped**. Values persist in `data/runtime-config.json` (overlay wins over file/env on restart).
@@ -53,8 +56,9 @@ In-app / API presets for paper research. Apply via **Settings** tab or `POST /co
 | `MIN_LIQUIDITY_USD` | **5000** | **2000** |
 | `MIN_VOLUME_24H_USD` | **8000** | **3000** |
 | `MIN_AGE_MINUTES` | **3** | **0** (newer coins OK) |
-| `BANKROLL_USD` | 20 | 20 |
-| `DAILY_LOSS_USD` | 5 | 5 |
+| `BANKROLL_USD` | 20 (sticky — not applied) | 20 (sticky) |
+| `DAILY_LOSS_USD` | 5 (sticky) | 5 (sticky) |
+| `MAX_POSITION_USD` | 25 (sticky) | 25 (sticky) |
 | `POSITION_SIZE_PCT` | 0.95 | 0.95 |
 
 Presets never change `PAPER_MODE`, `MARKET_DATA_SOURCE`, or ledger/wallet paths. PATCH `/config` rejects those live-dangerous fields.
@@ -68,6 +72,8 @@ Presets never change `PAPER_MODE`, `MARKET_DATA_SOURCE`, or ledger/wallet paths.
 5. **Trailing TP** — after unrealized gain ≥ `TRAIL_ACTIVATE_PCT`, arm a trail; sell if mark ≤ high-water × `(1 - TRAIL_DISTANCE_PCT/100)` (`trailing_take_profit`).
 6. **Manual exit** — `POST /runner/exit` (or `/position/exit`) / app **Exit now** (PnL tab) flattens the open paper position at the current mark (`manual_exit`).
 7. **Daily loss cap** — when session realized PnL ≤ `−DAILY_LOSS_USD`, the runner stops (no new paper entries). **Start does not clear the ledger** — use `POST /runner/reset` (or Start with `?reset=1`) / the app **Reset** button on the **PnL** tab to restore `BANKROLL_USD` cash and unlock another session.
+8. **Vault skim** — `POST /vault/skim` locks cash into `vaultUsd` (excluded from sizing). Survives Reset. Optional `POST /vault/return`.
+9. **Max position** — entry notional ≤ `MAX_POSITION_USD` (default `$25`) in addition to `POSITION_SIZE_PCT` × tradable cash.
 
 ## Quick start (paper mode, Linux)
 
@@ -127,10 +133,12 @@ npm run api
 | GET | `/status` | Runner state, cycle, `stopReason`, errors |
 | POST | `/runner/start` | **PAPER_MODE only**. Optional `?reset=1` or JSON `{ "reset": true }` clears the paper session first |
 | POST | `/runner/stop` | Stop loop |
-| POST | `/runner/reset` | **PAPER_MODE only**: stop if running, rebuild ledger to `BANKROLL_USD`, clear `stopReason` / cycles, empty trades. Response includes `status` + `portfolio` |
-| GET | `/portfolio` | Bankroll / cash / equity / PnL / positions (`openPositions[].mint` + `.symbol` for chart URLs) |
+| POST | `/runner/reset` | **PAPER_MODE only**: stop if running, rebuild ledger to `BANKROLL_USD`, clear `stopReason` / cycles, empty trades. **Vault is kept.** Response includes `status` + `portfolio` |
+| GET | `/portfolio` | Bankroll / tradable cash / vault / equity / PnL / positions (`openPositions[].mint` + `.symbol`); also top-level `vaultUsd`, `tradableCashUsd`, `maxPositionUsd` |
+| POST | `/vault/skim` | **PAPER_MODE**: `{ "amountUsd" }` or `{ "percentOfProfit" }` — lock cash out of sizing |
+| POST | `/vault/return` | **PAPER_MODE**: `{ "amountUsd" }` — vault → tradable |
 | GET | `/config` | Public config + `activePreset` + `availablePresets` (no secrets) |
-| PATCH / PUT | `/config` | **PAPER_MODE only**: update paper knobs (bankroll, stops, trail, TP, momentum filters, min age, max hold, daily loss, poll). Persists `data/runtime-config.json`. **409** if runner running — stop first. Rejects `paperMode` / wallet / live fields |
+| PATCH / PUT | `/config` | **PAPER_MODE only**: update paper knobs (bankroll, max position, stops, trail, TP, momentum filters, min age, max hold, daily loss, poll). Persists `data/runtime-config.json`. **409** if runner running — stop first. Rejects `paperMode` / wallet / live fields |
 | POST | `/config/preset` | Body `{ "preset": "momentum" \| "sniper" }` — apply named preset + persist. **409** if runner running |
 | GET | `/trades?limit=50` | Recent fills (session ledger; cleared by Reset) |
 | GET | `/journal?limit=&offset=` | **Trade journal** — closed paper trades newest first (survives Reset) |
@@ -151,7 +159,7 @@ npm run api
 
 CORS is open for local mobile / LAN browsers. Writes that start trading refuse unless `PAPER_MODE=true`. Live trading stays stubbed.
 
-**After a `daily_loss_cap` stop:** calling Start alone leaves realized PnL in the ledger, so the runner exits again on the next cycle. Hit **Reset** on the Android **PnL** tab (confirm dialog) or `POST /runner/reset` first. Reset clears the session ledger but **keeps** `data/journal.json` (learning history).
+**After a `daily_loss_cap` stop:** calling Start alone leaves realized PnL in the ledger, so the runner exits again on the next cycle. Hit **Reset** on the Android **PnL** tab (confirm dialog) or `POST /runner/reset` first. Reset clears the session ledger but **keeps** `data/journal.json` (learning history) and **`data/vault.json`** (skimmed funds).
 
 Other scripts:
 
@@ -168,6 +176,7 @@ Ledger output (under `data/`):
 - `trades.json` — full fill records (session; cleared by Reset)  
 - `trades.csv` — spreadsheet-friendly log  
 - `journal.json` — append-only closed-trade journal + notes (survives Reset)  
+- `vault.json` — skimmed / vaulted USD (survives Reset; not used for sizing)  
 - Cash / positions / PnL printed each exit and at shutdown  
 
 ## Android APK (Capacitor control UI)
@@ -185,7 +194,7 @@ Location: `mobile/` — Vite + Capacitor Android shell. **No wallet / no private
      find laptop IP (`ip -4 addr` or `hostname -I`)  
      then API URL `http://<laptop-lan-ip>:8787`  
      (allow port 8787 in the laptop firewall if needed)
-3. **Status** / **Run** / **PnL** / **Check** / **Journal** / **Settings** tabs hit that API. **Start / Stop** on **Run**; **Exit now** / **Reset** on **PnL**; **Momentum | Sniper** + editable paper knobs on **Settings** (stop runner before applying). Server must have `PAPER_MODE=true`. Reset clears the ledger and any `stopReason` (e.g. daily-loss lock). With an open position, **PnL** embeds a **DexScreener** live chart (`mint` from `/portfolio`); Pump.fun blocks iframes — use **Open on Pump.fun**. See `docs/pnl-chart.md`.
+3. **Status** / **Run** / **PnL** / **Check** / **Journal** / **Settings** tabs hit that API. **Start / Stop** on **Run**; **Exit now** / **Reset** / **Skim $ · Skim % · Return** on **PnL**; **Momentum | Sniper** + editable paper knobs (incl. sticky **Max position USD**) on **Settings** (stop runner before applying). Server must have `PAPER_MODE=true`. Reset clears the ledger and any `stopReason` (e.g. daily-loss lock) but **keeps the vault**. With an open position, **PnL** embeds a **DexScreener** live chart (`mint` from `/portfolio`); Pump.fun blocks iframes — use **Open on Pump.fun**. See `docs/pnl-chart.md` and `docs/vault-max-position.md`.
 
 ### Build a debug APK on Linux
 

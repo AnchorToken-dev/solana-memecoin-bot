@@ -103,9 +103,13 @@ export function createControlApp(engine: BotEngine) {
   app.get("/portfolio", async (_req, res) => {
     try {
       // portfolio.openPositions[] includes mint + symbol (Position) for chart URLs.
+      // vaultUsd / tradableCashUsd: sizing uses tradable only; vault survives reset.
       const portfolio = await engine.getPortfolio();
       res.json({
         bankrollUsd: engine.cfg.bankrollUsd,
+        maxPositionUsd: engine.cfg.maxPositionUsd,
+        vaultUsd: portfolio.vaultUsd,
+        tradableCashUsd: portfolio.tradableCashUsd,
         portfolio,
       });
     } catch (err) {
@@ -113,6 +117,44 @@ export function createControlApp(engine: BotEngine) {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  });
+
+  /**
+   * Skim tradable cash → vault (locked out of sizing).
+   * Body: { "amountUsd": number } OR { "percentOfProfit": number }
+   * percentOfProfit skims % of max(0, cash − bankrollUsd).
+   * Vault survives /runner/reset.
+   */
+  app.post("/vault/skim", (req, res) => {
+    if (!engine.cfg.paperMode) {
+      res.status(403).json({
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing vault skim while live mode is configured (live is stubbed).",
+        status: engine.getStatus(),
+      });
+      return;
+    }
+    const result = engine.skimToVault(req.body);
+    res.status(result.ok ? 200 : 400).json(result);
+  });
+
+  /**
+   * Return vault → tradable cash (paper convenience).
+   * Body: { "amountUsd": number }
+   */
+  app.post("/vault/return", (req, res) => {
+    if (!engine.cfg.paperMode) {
+      res.status(403).json({
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing vault return while live mode is configured (live is stubbed).",
+        status: engine.getStatus(),
+      });
+      return;
+    }
+    const result = engine.returnFromVault(req.body);
+    res.status(result.ok ? 200 : 400).json(result);
   });
 
   app.get("/trades", (req, res) => {

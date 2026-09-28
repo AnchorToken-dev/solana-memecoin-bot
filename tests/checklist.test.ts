@@ -26,6 +26,7 @@ function baseCfg(over: Partial<BotConfig> = {}): BotConfig {
     stopLossPct: 10,
     takeProfitPct: 25,
     positionSizePct: 0.95,
+    maxPositionUsd: 25,
     momentum: {
       minPct: 1,
       windowMinutes: 5,

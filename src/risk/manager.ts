@@ -16,7 +16,8 @@ export interface SizeResult {
 /**
  * Risk gates:
  *  - Never exceed MAX_OPEN_TRADES (default 1)
- *  - Size = cash * POSITION_SIZE_PCT (default 0.95)
+ *  - Size = min(cash * POSITION_SIZE_PCT, maxPositionUsd if >0, cash)
+ *  - cashUsd must be TRADABLE only (caller passes ledger.cash after vault skim)
  *  - Refuse zero/negative price
  *  - Refuse new entries when session daily loss cap is hit
  */
@@ -58,7 +59,13 @@ export function sizePosition(
     };
   }
 
-  const notionalUsd = req.cashUsd * cfg.positionSizePct;
+  // Tradable cash only — vault is never passed in as cashUsd.
+  let notionalUsd = req.cashUsd * cfg.positionSizePct;
+  if (cfg.maxPositionUsd > 0) {
+    notionalUsd = Math.min(notionalUsd, cfg.maxPositionUsd);
+  }
+  notionalUsd = Math.min(notionalUsd, req.cashUsd);
+
   if (notionalUsd < 1) {
     return {
       ok: false,

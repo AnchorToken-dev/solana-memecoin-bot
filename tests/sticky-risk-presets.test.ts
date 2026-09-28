@@ -19,6 +19,7 @@ function baseCfg(over: Partial<BotConfig> = {}): BotConfig {
     stopLossPct: 10,
     takeProfitPct: 25,
     positionSizePct: 0.95,
+    maxPositionUsd: 25,
     momentum: { ...MOMENTUM_PRESET.momentum },
     trailingTakeProfit: { ...MOMENTUM_PRESET.trailingTakeProfit },
     paperBroker: { slippageBps: 50, feeBps: 30 },
@@ -34,10 +35,11 @@ function baseCfg(over: Partial<BotConfig> = {}): BotConfig {
 }
 
 describe("sticky session risk across presets", () => {
-  it("applyPresetKnobs keeps bankroll 100 and dailyLoss 25", () => {
-    const cfg = baseCfg();
+  it("applyPresetKnobs keeps bankroll 100, dailyLoss 25, maxPosition 25", () => {
+    const cfg = baseCfg({ maxPositionUsd: 25 });
     assert.equal(cfg.bankrollUsd, 100);
     assert.equal(cfg.dailyLossUsd, 25);
+    assert.equal(cfg.maxPositionUsd, 25);
 
     applyPresetKnobs(cfg, "sniper");
     assert.equal(cfg.activePreset, "sniper");
@@ -46,12 +48,14 @@ describe("sticky session risk across presets", () => {
     assert.equal(cfg.momentum.minAgeMinutes, 0);
     assert.equal(cfg.bankrollUsd, 100, "bankroll must stay sticky");
     assert.equal(cfg.dailyLossUsd, 25, "daily loss must stay sticky");
+    assert.equal(cfg.maxPositionUsd, 25, "max position must stay sticky");
 
     applyPresetKnobs(cfg, "momentum");
     assert.equal(cfg.activePreset, "momentum");
     assert.equal(cfg.stopLossPct, MOMENTUM_PRESET.stopLossPct);
     assert.equal(cfg.bankrollUsd, 100);
     assert.equal(cfg.dailyLossUsd, 25);
+    assert.equal(cfg.maxPositionUsd, 25);
   });
 });
 
@@ -89,7 +93,7 @@ describe("POST /config/preset keeps sticky risk", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("sniper then momentum keep 100/25 on config + disk", async () => {
+  it("sniper then momentum keep 100/25/25 on config + disk", async () => {
     let res = await fetch(`${base}/config/preset`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -101,6 +105,7 @@ describe("POST /config/preset keeps sticky risk", () => {
     assert.equal(body.config.activePreset, "sniper");
     assert.equal(body.config.bankrollUsd, 100);
     assert.equal(body.config.dailyLossUsd, 25);
+    assert.equal(body.config.maxPositionUsd, 25);
     assert.equal(body.config.stopLossPct, 8);
     assert.match(body.message, /sticky/i);
 
@@ -114,16 +119,19 @@ describe("POST /config/preset keeps sticky risk", () => {
     assert.equal(body.config.activePreset, "momentum");
     assert.equal(body.config.bankrollUsd, 100);
     assert.equal(body.config.dailyLossUsd, 25);
+    assert.equal(body.config.maxPositionUsd, 25);
     assert.equal(body.config.stopLossPct, 10);
 
     const disk = JSON.parse(readFileSync(overlayPath, "utf8")) as {
       bankrollUsd: number;
       dailyLossUsd: number;
+      maxPositionUsd: number;
       activePreset: string;
       stopLossPct: number;
     };
     assert.equal(disk.bankrollUsd, 100);
     assert.equal(disk.dailyLossUsd, 25);
+    assert.equal(disk.maxPositionUsd, 25);
     assert.equal(disk.activePreset, "momentum");
     assert.equal(disk.stopLossPct, 10);
   });

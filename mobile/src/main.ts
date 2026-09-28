@@ -220,6 +220,9 @@ async function paintBankroll(main: Element) {
   const p = data.portfolio;
   const positions = p.openPositions ?? [];
   const hasOpen = positions.length > 0;
+  const vaultUsd = typeof p.vaultUsd === "number" ? p.vaultUsd : (data.vaultUsd ?? 0);
+  const tradable = typeof p.tradableCashUsd === "number" ? p.tradableCashUsd : p.cashUsd;
+  const totalEq = typeof p.totalEquityUsd === "number" ? p.totalEquityUsd : p.equityUsd + vaultUsd;
   const stopReason =
     typeof status.stopReason === "string" && status.stopReason
       ? status.stopReason
@@ -228,8 +231,10 @@ async function paintBankroll(main: Element) {
     <div class="card">
       <h2>Bankroll / PnL</h2>
       <div class="row"><span class="k">Configured bankroll</span><span class="v" data-k="bankroll">${money(data.bankrollUsd)}</span></div>
-      <div class="row"><span class="k">Cash</span><span class="v" data-k="cash">${money(p.cashUsd)}</span></div>
-      <div class="row"><span class="k">Equity</span><span class="v" data-k="equity">${money(p.equityUsd)}</span></div>
+      <div class="row"><span class="k">Tradable cash</span><span class="v" data-k="cash">${money(tradable)}</span></div>
+      <div class="row"><span class="k">Vault (skimmed)</span><span class="v" data-k="vault">${money(vaultUsd)}</span></div>
+      <div class="row"><span class="k">Trading equity</span><span class="v" data-k="equity">${money(p.equityUsd)}</span></div>
+      <div class="row"><span class="k">Total (equity+vault)</span><span class="v" data-k="totalEq">${money(totalEq)}</span></div>
       <div class="row"><span class="k">Realized PnL</span><span class="v" data-k="realized">${money(p.realizedPnlUsd)}</span></div>
       <div class="row"><span class="k">Unrealized PnL</span><span class="v" data-k="unrealized">${money(p.unrealizedPnlUsd)}</span></div>
       <div class="row"><span class="k">Trades</span><span class="v" data-k="trades">${escapeHtml(String(p.tradeCount))}</span></div>
@@ -244,7 +249,21 @@ async function paintBankroll(main: Element) {
         <button class="secondary" id="reset" ${busy?"disabled":""}>Reset</button>
         <button class="secondary" id="refresh">Refresh</button>
       </div>
-      <p class="muted" style="margin-top:10px">Exit now flattens the open paper position at the current mark (<code>manual_exit</code>). Reset restores <code>BANKROLL_USD</code> cash and clears <code>stopReason</code>. Start/Stop stay on the Run tab.</p>
+      <p class="muted" style="margin-top:10px">Exit now flattens the open paper position at the current mark (<code>manual_exit</code>). Reset restores <code>BANKROLL_USD</code> cash and clears <code>stopReason</code> — <strong>vault survives Reset</strong>. Start/Stop stay on the Run tab. Sizing uses <strong>tradable cash only</strong> (never vault).</p>
+    </div>
+    <div class="card">
+      <h2>Vault / skim</h2>
+      <p class="muted">Lock paper profit away so the bot cannot all-in vaulted funds. <strong>Skim %</strong> takes % of cash above the configured bankroll floor.</p>
+      <div class="field-grid">
+        <label>Skim $ USD<input id="skimAmt" type="number" step="0.01" min="0.01" value="25" /></label>
+        <label>Skim % of profit<input id="skimPct" type="number" step="1" min="1" max="100" value="50" /></label>
+        <label>Return $ from vault<input id="returnAmt" type="number" step="0.01" min="0.01" value="${escapeAttr(String(vaultUsd > 0 ? Math.min(vaultUsd, 25) : 10))}" /></label>
+      </div>
+      <div class="actions">
+        <button class="primary" id="skimUsdBtn" ${busy?"disabled":""}>Skim $</button>
+        <button class="secondary" id="skimPctBtn" ${busy?"disabled":""}>Skim %</button>
+        <button class="secondary" id="returnVaultBtn" ${busy||vaultUsd<=0?"disabled":""}>Return</button>
+      </div>
     </div>
     <div class="card">
       <h2>Open positions (${positions.length})</h2>
@@ -257,7 +276,7 @@ async function paintBankroll(main: Element) {
   main.querySelector("#refresh")?.addEventListener("click", () => void render());
   main.querySelector("#reset")?.addEventListener("click", () => {
     const ok = window.confirm(
-      "Reset paper session?\n\nThis stops the runner (if running), clears trades, and restores cash to BANKROLL_USD. The daily-loss lock is cleared so Start works again.",
+      "Reset paper session?\n\nThis stops the runner (if running), clears trades, and restores cash to BANKROLL_USD. The daily-loss lock is cleared so Start works again.\n\nVault (skimmed) is KEPT.",
     );
     if (!ok) return;
     void withBusy(async () => {
@@ -272,6 +291,27 @@ async function paintBankroll(main: Element) {
     if (!ok) return;
     void withBusy(async () => {
       const r = await api.exitNow();
+      message = r.message;
+    });
+  });
+  main.querySelector("#skimUsdBtn")?.addEventListener("click", () => {
+    const amountUsd = Number((main.querySelector("#skimAmt") as HTMLInputElement).value);
+    void withBusy(async () => {
+      const r = await api.vaultSkim({ amountUsd });
+      message = r.message;
+    });
+  });
+  main.querySelector("#skimPctBtn")?.addEventListener("click", () => {
+    const percentOfProfit = Number((main.querySelector("#skimPct") as HTMLInputElement).value);
+    void withBusy(async () => {
+      const r = await api.vaultSkim({ percentOfProfit });
+      message = r.message;
+    });
+  });
+  main.querySelector("#returnVaultBtn")?.addEventListener("click", () => {
+    const amountUsd = Number((main.querySelector("#returnAmt") as HTMLInputElement).value);
+    void withBusy(async () => {
+      const r = await api.vaultReturn(amountUsd);
       message = r.message;
     });
   });
@@ -591,7 +631,7 @@ async function paintSettings(main: Element, base: string) {
     <div class="card">
       <h2>Strategy preset</h2>
       <p class="muted">Paper knobs only. Applying a preset requires the runner <strong>stopped</strong>.</p>
-      <p class="muted"><strong>Session risk:</strong> Bankroll USD and Daily loss USD are sticky — switching Momentum ↔ Sniper does <em>not</em> reset them. Edit those fields + Save if you want new risk sizes.</p>
+      <p class="muted"><strong>Session risk:</strong> Bankroll USD, Daily loss USD, and Max position USD are sticky — switching Momentum ↔ Sniper does <em>not</em> reset them. Edit those fields + Save if you want new risk sizes.</p>
       <div class="row"><span class="k">Active preset</span><span class="v" id="activePresetLabel">${escapeHtml(active)}</span></div>
       <div class="preset-toggle" role="group" aria-label="Preset">
         <button type="button" class="preset-btn ${active==="momentum"?"active":""}" id="presetMomentum" ${busy||running?"disabled":""}>Momentum</button>
@@ -607,6 +647,7 @@ async function paintSettings(main: Element, base: string) {
       <h2>Paper parameters</h2>
       <div class="field-grid">
         <label>Bankroll USD <span class="muted">(session risk)</span><input id="fBankroll" type="number" step="0.01" min="0.01" value="${escapeAttr(num(cfg.bankrollUsd))}" /></label>
+        <label>Max position USD <span class="muted">(session risk)</span><input id="fMaxPos" type="number" step="0.01" min="0" value="${escapeAttr(num(cfg.maxPositionUsd, "25"))}" /></label>
         <label>Stop loss %<input id="fStop" type="number" step="0.1" min="0.1" value="${escapeAttr(num(cfg.stopLossPct))}" /></label>
         <label>Take profit %<input id="fTp" type="number" step="0.1" min="0" value="${escapeAttr(num(cfg.takeProfitPct))}" /></label>
         <label>Trail activate %<input id="fTrailAct" type="number" step="0.1" min="0.1" value="${escapeAttr(num(trail.activatePct))}" /></label>
@@ -686,6 +727,7 @@ async function paintSettings(main: Element, base: string) {
     void withBusy(async () => {
       const r = await api.patchConfig({
         bankrollUsd: n("fBankroll"),
+        maxPositionUsd: n("fMaxPos"),
         stopLossPct: n("fStop"),
         takeProfitPct: n("fTp"),
         maxHoldMinutes: n("fHold"),
@@ -753,9 +795,14 @@ async function softRefreshBankroll() {
       const el = main.querySelector(`[data-k="${key}"]`);
       if (el) el.textContent = val;
     };
+    const vaultUsd = typeof p.vaultUsd === "number" ? p.vaultUsd : (data.vaultUsd ?? 0);
+    const tradable = typeof p.tradableCashUsd === "number" ? p.tradableCashUsd : p.cashUsd;
+    const totalEq = typeof p.totalEquityUsd === "number" ? p.totalEquityUsd : p.equityUsd + vaultUsd;
     set("bankroll", money(data.bankrollUsd));
-    set("cash", money(p.cashUsd));
+    set("cash", money(tradable));
+    set("vault", money(vaultUsd));
     set("equity", money(p.equityUsd));
+    set("totalEq", money(totalEq));
     set("realized", money(p.realizedPnlUsd));
     set("unrealized", money(p.unrealizedPnlUsd));
     set("trades", String(p.tradeCount));

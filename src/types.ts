@@ -45,6 +45,12 @@ export interface BotConfig {
    */
   takeProfitPct: number;
   positionSizePct: number;
+  /**
+   * Hard USD cap per open paper trade (after positionSizePct).
+   * 0 = disabled. Sticky across presets with bankroll / daily loss.
+   * Default 25 — sensible for a ~$100 bankroll / one-trade style.
+   */
+  maxPositionUsd: number;
   momentum: MomentumParams;
   trailingTakeProfit: TrailingTakeProfitParams;
   paperBroker: PaperBrokerParams;
@@ -138,8 +144,19 @@ export interface TradeRecord {
 }
 
 export interface PortfolioSnapshot {
+  /** Tradable cash (not in vault). Sizing uses this only. */
   cashUsd: number;
+  /** Alias of cashUsd — funds available to size new entries. */
+  tradableCashUsd: number;
+  /**
+   * Skimmed / vaulted USD locked out of sizing.
+   * Survives /runner/reset (like journal); not cleared with the session ledger.
+   */
+  vaultUsd: number;
+  /** Mark-to-market of cash + open positions (excludes vault). */
   equityUsd: number;
+  /** equityUsd + vaultUsd — total paper wealth. */
+  totalEquityUsd: number;
   openPositions: Position[];
   realizedPnlUsd: number;
   unrealizedPnlUsd: number;
