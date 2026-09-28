@@ -140,7 +140,9 @@ async function paintStatus(main: Element) {
   const trail = cfg.trailingTakeProfit as
     | { activatePct?: number; distancePct?: number }
     | undefined;
+  const lock = readChaseLockout(status);
   main.innerHTML = `
+    ${chaseLockoutBanner(lock)}
     <div class="card">
       <h2>Engine status</h2>
       <div class="row"><span class="k">Health</span><span class="v">${health.ok ? "ok" : "bad"}</span></div>
@@ -179,7 +181,10 @@ async function paintControl(main: Element) {
   const cfg = cfgWrap.config ?? {};
   const tp =
     typeof cfg.takeProfitPct === "number" ? cfg.takeProfitPct : null;
+  const lock = readChaseLockout(status);
+  const locked = !!(lock && lock.active);
   main.innerHTML = `
+    ${chaseLockoutBanner(lock)}
     <div class="card">
       <h2>Paper runner</h2>
       <p class="muted">Start/stop only works while the server has PAPER_MODE=true. Live trading is stubbed — this app never holds keys.</p>
@@ -189,11 +194,11 @@ async function paintControl(main: Element) {
       ${
         stopReason
           ? `<div class="row"><span class="k">Stop reason</span><span class="v warn-text">${escapeHtml(stopReason)}</span></div>
-             <p class="muted">Daily-loss (or other) lock stays until you <strong>Reset</strong> on the PnL tab — Start alone does not clear the ledger.</p>`
+             <p class="muted">Daily-loss lock clears with <strong>Reset</strong> on the PnL tab. <strong>Chase lockout</strong> (full original deposit lost) does <em>not</em> — timer only on the laptop/API.</p>`
           : ""
       }
       <div class="actions">
-        <button class="primary" id="start" ${busy||running?"disabled":""}>Start paper bot</button>
+        <button class="primary" id="start" ${busy||running||locked?"disabled":""}>Start paper bot</button>
         <button class="danger" id="stop" ${busy||!running?"disabled":""}>Stop</button>
         <button class="secondary" id="refresh">Refresh</button>
       </div>
@@ -227,7 +232,9 @@ async function paintBankroll(main: Element) {
     typeof status.stopReason === "string" && status.stopReason
       ? status.stopReason
       : null;
+  const lock = readChaseLockout(status) ?? readChaseLockout(data as unknown as Record<string, unknown>);
   main.innerHTML = `
+    ${chaseLockoutBanner(lock)}
     <div class="card">
       <h2>Bankroll / PnL</h2>
       <div class="row"><span class="k">Configured bankroll</span><span class="v" data-k="bankroll">${money(data.bankrollUsd)}</span></div>
@@ -241,7 +248,7 @@ async function paintBankroll(main: Element) {
       ${
         stopReason
           ? `<div class="row"><span class="k">Stop reason</span><span class="v warn-text" data-k="stopReason">${escapeHtml(stopReason)}</span></div>
-             <p class="muted">Use <strong>Reset</strong> below to clear the ledger / daily-loss lock before Start will stick.</p>`
+             <p class="muted">Use <strong>Reset</strong> to clear the ledger / daily-loss lock. Chase lockout (full deposit wipe) stays until unlock-at — Reset will not clear it.</p>`
           : `<div class="row hidden" id="stopReasonRow"><span class="k">Stop reason</span><span class="v" data-k="stopReason">—</span></div>`
       }
       <div class="actions">
@@ -249,7 +256,7 @@ async function paintBankroll(main: Element) {
         <button class="secondary" id="reset" ${busy?"disabled":""}>Reset</button>
         <button class="secondary" id="refresh">Refresh</button>
       </div>
-      <p class="muted" style="margin-top:10px">Exit now flattens the open paper position at the current mark (<code>manual_exit</code>). Reset restores <code>BANKROLL_USD</code> cash and clears <code>stopReason</code> — <strong>vault survives Reset</strong>. Start/Stop stay on the Run tab. Sizing uses <strong>tradable cash only</strong> (never vault).</p>
+      <p class="muted" style="margin-top:10px">Exit now flattens the open paper position at the current mark (<code>manual_exit</code>). Reset restores <code>BANKROLL_USD</code> cash and clears daily-loss <code>stopReason</code> — <strong>vault</strong> and <strong>chase lockout</strong> survive Reset. Start/Stop stay on the Run tab. Sizing uses <strong>tradable cash only</strong> (never vault). Loss vs <strong>original deposit</strong> (configured bankroll), not growing equity.</p>
     </div>
     <div class="card">
       <h2>Vault / skim</h2>
@@ -276,7 +283,7 @@ async function paintBankroll(main: Element) {
   main.querySelector("#refresh")?.addEventListener("click", () => void render());
   main.querySelector("#reset")?.addEventListener("click", () => {
     const ok = window.confirm(
-      "Reset paper session?\n\nThis stops the runner (if running), clears trades, and restores cash to BANKROLL_USD. The daily-loss lock is cleared so Start works again.\n\nVault (skimmed) is KEPT.",
+      "Reset paper session?\n\nThis stops the runner (if running), clears trades, and restores cash to BANKROLL_USD. The daily-loss lock is cleared.\n\nVault (skimmed) is KEPT.\nChase lockout (if active after full deposit loss) is NOT cleared — wait for unlock-at.",
     );
     if (!ok) return;
     void withBusy(async () => {
@@ -652,12 +659,14 @@ async function paintSettings(main: Element, base: string) {
   const running = status.state === "running" || status.state === "starting";
   const num = (v: unknown, fallback = ""): string =>
     typeof v === "number" && Number.isFinite(v) ? String(v) : fallback;
+  const lock = readChaseLockout(status);
 
   main.innerHTML = `
+    ${chaseLockoutBanner(lock)}
     <div class="card">
       <h2>Strategy preset</h2>
       <p class="muted">Paper knobs only. Applying a preset requires the runner <strong>stopped</strong>.</p>
-      <p class="muted"><strong>Session risk:</strong> Bankroll USD, Daily loss USD, and Max position USD are sticky — switching Momentum ↔ Sniper does <em>not</em> reset them. Edit those fields + Save if you want new risk sizes.</p>
+      <p class="muted"><strong>Session risk:</strong> Bankroll USD, Daily loss USD, Max position USD, and Chase lockout hours are sticky — switching Momentum ↔ Sniper does <em>not</em> reset them. Edit those fields + Save if you want new risk sizes.</p>
       <div class="row"><span class="k">Active preset</span><span class="v" id="activePresetLabel">${escapeHtml(active)}</span></div>
       <div class="preset-toggle" role="group" aria-label="Preset">
         <button type="button" class="preset-btn ${active==="momentum"?"active":""}" id="presetMomentum" ${busy||running?"disabled":""}>Momentum</button>
@@ -680,6 +689,7 @@ async function paintSettings(main: Element, base: string) {
         <label>Trail distance %<input id="fTrailDist" type="number" step="0.1" min="0.1" value="${escapeAttr(num(trail.distancePct))}" /></label>
         <label>Max hold min<input id="fHold" type="number" step="1" min="0" value="${escapeAttr(num(cfg.maxHoldMinutes))}" /></label>
         <label>Daily loss USD <span class="muted">(session risk)</span><input id="fDaily" type="number" step="0.01" min="0" value="${escapeAttr(num(cfg.dailyLossUsd))}" /></label>
+        <label>Chase lockout hours <span class="muted">(session risk; 0=off)</span><input id="fChase" type="number" step="0.25" min="0" value="${escapeAttr(num(cfg.chaseLockoutHours, "12"))}" /></label>
         <label>Poll interval ms<input id="fPoll" type="number" step="100" min="100" value="${escapeAttr(num(runner.pollIntervalMs))}" /></label>
         <label>Momentum min %<input id="fMomPct" type="number" step="0.1" min="0.1" value="${escapeAttr(num(mom.minPct))}" /></label>
         <label>Min age min<input id="fAge" type="number" step="1" min="0" value="${escapeAttr(num(mom.minAgeMinutes))}" /></label>
@@ -758,6 +768,7 @@ async function paintSettings(main: Element, base: string) {
         takeProfitPct: n("fTp"),
         maxHoldMinutes: n("fHold"),
         dailyLossUsd: n("fDaily"),
+        chaseLockoutHours: n("fChase"),
         trailingTakeProfit: {
           activatePct: n("fTrailAct"),
           distancePct: n("fTrailDist"),
@@ -832,6 +843,10 @@ async function softRefreshBankroll() {
     set("realized", money(p.realizedPnlUsd));
     set("unrealized", money(p.unrealizedPnlUsd));
     set("trades", String(p.tradeCount));
+    const lockSoft = readChaseLockout(status) ?? readChaseLockout(data as unknown as Record<string, unknown>);
+    if (lockSoft?.active) {
+      set("chaseUnlock", formatUnlockAt(lockSoft.unlockAt));
+    }
     const stopEl = main.querySelector("[data-k=\"stopReason\"]");
     const stopReason =
       typeof status.stopReason === "string" && status.stopReason
@@ -897,6 +912,46 @@ function escapeHtml(s: string): string {
 function escapeAttr(s: string): string {
   return escapeHtml(s);
 }
+
+type ChaseLockoutUI = {
+  active?: boolean;
+  unlockAt?: number | null;
+  lockedAt?: number | null;
+  reason?: string | null;
+  originalDepositUsd?: number | null;
+  remainingMs?: number;
+  lockoutHours?: number | null;
+};
+
+function readChaseLockout(statusOrPort: Record<string, unknown>): ChaseLockoutUI | null {
+  const raw = statusOrPort.chaseLockout;
+  if (raw == null || typeof raw !== "object") return null;
+  return raw as ChaseLockoutUI;
+}
+
+function formatUnlockAt(unlockAt: number | null | undefined): string {
+  if (unlockAt == null || !Number.isFinite(unlockAt)) return "—";
+  try {
+    return new Date(unlockAt).toLocaleString();
+  } catch {
+    return String(unlockAt);
+  }
+}
+
+function chaseLockoutBanner(lock: ChaseLockoutUI | null): string {
+  if (!lock || !lock.active) return "";
+  const until = formatUnlockAt(lock.unlockAt);
+  const reason = lock.reason ? escapeHtml(String(lock.reason)) : "Full original deposit lost";
+  return `<div class="card" style="border-color:#c45c26">
+      <h2 class="warn-text">Chase lockout</h2>
+      <p class="muted">Trading locked on the <strong>laptop/API</strong> after wiping the original deposit (not growing equity). Phone restart / Reset cannot bypass.</p>
+      <div class="row"><span class="k">Status</span><span class="v warn-text">LOCKED</span></div>
+      <div class="row"><span class="k">Unlock at</span><span class="v" data-k="chaseUnlock">${escapeHtml(until)}</span></div>
+      <div class="row"><span class="k">Reason</span><span class="v">${reason}</span></div>
+      <p class="muted">Timer-only unlock (paper preview). Wait until unlock-at — there is no easy unlock button.</p>
+    </div>`;
+}
+
 
 void render();
 setInterval(() => {

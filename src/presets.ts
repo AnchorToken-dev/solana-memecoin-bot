@@ -10,9 +10,9 @@ export const PRESET_NAMES: readonly PresetName[] = ["momentum", "sniper"] as con
 
 /**
  * Fields a named preset overwrites (strategy knobs only).
- * Session risk — bankrollUsd / dailyLossUsd / maxPositionUsd — is NOT in a preset;
- * applyPresetKnobs preserves them from the current config
- * (Mark’s sticky $100 / $25 / $25 max position).
+ * Session risk — bankrollUsd / dailyLossUsd / maxPositionUsd / chaseLockoutHours —
+ * is NOT in a preset; applyPresetKnobs preserves them from the current config
+ * (Mark’s sticky $100 / $25 / $25 max position / 12h chase lockout).
  */
 export type PresetKnobs = Pick<
   BotConfig,
@@ -31,6 +31,7 @@ export const PRESET_DISPLAY_RISK = {
   bankrollUsd: 20,
   dailyLossUsd: 5,
   maxPositionUsd: 25,
+  chaseLockoutHours: 12,
 } as const;
 
 /**
@@ -95,14 +96,16 @@ export function isPresetName(v: unknown): v is PresetName {
 
 /**
  * Deep-apply strategy knobs onto a mutable BotConfig (in place).
- * Preserves cfg.bankrollUsd, cfg.dailyLossUsd, and cfg.maxPositionUsd (session risk).
+ * Preserves cfg.bankrollUsd, cfg.dailyLossUsd, cfg.maxPositionUsd, and
+ * cfg.chaseLockoutHours (session risk).
  */
 export function applyPresetKnobs(cfg: BotConfig, preset: PresetName): void {
   const knobs = PRESETS[preset];
-  // Sticky session risk — do not wipe Mark’s bankroll / daily loss / max position.
+  // Sticky session risk — do not wipe Mark’s bankroll / daily loss / max pos / lockout.
   const stickyBankroll = cfg.bankrollUsd;
   const stickyDailyLoss = cfg.dailyLossUsd;
   const stickyMaxPosition = cfg.maxPositionUsd;
+  const stickyChaseLockout = cfg.chaseLockoutHours;
 
   cfg.stopLossPct = knobs.stopLossPct;
   cfg.takeProfitPct = knobs.takeProfitPct;
@@ -117,5 +120,6 @@ export function applyPresetKnobs(cfg: BotConfig, preset: PresetName): void {
   cfg.bankrollUsd = stickyBankroll;
   cfg.dailyLossUsd = stickyDailyLoss;
   cfg.maxPositionUsd = stickyMaxPosition;
+  cfg.chaseLockoutHours = stickyChaseLockout;
   cfg.activePreset = preset;
 }

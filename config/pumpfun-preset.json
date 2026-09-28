@@ -29,6 +29,7 @@
   },
   "maxHoldMinutes": 20,
   "dailyLossUsd": 5,
+  "chaseLockoutHours": 12,
   "marketDataSource": "pumpfun",
   "ledgerDir": "data"
 }

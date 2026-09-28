@@ -51,12 +51,37 @@ export const api = {
   health: () => request<{ ok: boolean; paperMode: boolean }>("/health"),
   status: () => request<Record<string, unknown>>("/status"),
   config: () => request<{ config: Record<string, unknown> }>("/config"),
+  lockout: () =>
+    request<{
+      chaseLockout: {
+        active: boolean;
+        lockedAt: number | null;
+        unlockAt: number | null;
+        originalDepositUsd: number | null;
+        reason: string | null;
+        lockoutHours: number | null;
+        remainingMs: number;
+      };
+      chaseLockoutHours: number;
+      originalDepositUsd: number;
+      note?: string;
+    }>("/lockout"),
   portfolio: () =>
     request<{
       bankrollUsd: number;
       maxPositionUsd?: number;
       vaultUsd?: number;
       tradableCashUsd?: number;
+      chaseLockout?: {
+        active: boolean;
+        lockedAt: number | null;
+        unlockAt: number | null;
+        originalDepositUsd: number | null;
+        reason: string | null;
+        lockoutHours: number | null;
+        remainingMs: number;
+      };
+      chaseLockoutHours?: number;
       portfolio: {
         cashUsd: number;
         tradableCashUsd?: number;

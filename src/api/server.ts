@@ -38,6 +38,20 @@ export function createControlApp(engine: BotEngine) {
     res.json(engine.getStatus());
   });
 
+  /**
+   * Paper chase lockout status (also embedded in GET /status + /portfolio).
+   * Lives on laptop/API disk — phone restart cannot clear it.
+   * No unlock POST in paper preview (timer-only).
+   */
+  app.get("/lockout", (_req, res) => {
+    res.json({
+      chaseLockout: engine.getChaseLockout(),
+      chaseLockoutHours: engine.cfg.chaseLockoutHours,
+      originalDepositUsd: engine.cfg.bankrollUsd,
+      note: "Lockout threshold = configured bankroll (original deposit), not growing equity. Reset does not clear an active lockout.",
+    });
+  });
+
   app.get("/config", (_req, res) => {
     // Safe read — BotConfig has no private keys; do not echo process.env.
     res.json({ config: engine.getPublicConfig() });
@@ -110,6 +124,8 @@ export function createControlApp(engine: BotEngine) {
         maxPositionUsd: engine.cfg.maxPositionUsd,
         vaultUsd: portfolio.vaultUsd,
         tradableCashUsd: portfolio.tradableCashUsd,
+        chaseLockout: engine.getChaseLockout(),
+        chaseLockoutHours: engine.cfg.chaseLockoutHours,
         portfolio,
       });
     } catch (err) {
@@ -197,6 +213,7 @@ export function createControlApp(engine: BotEngine) {
   /**
    * Clear paper session (ledger → BANKROLL_USD, stopReason / cycles cleared).
    * PAPER_MODE only. Unlocks start after daily_loss_cap.
+   * Does NOT clear an active chase lockout (timer-only unlock).
    */
   app.post("/runner/reset", async (_req, res) => {
     if (!engine.cfg.paperMode) {

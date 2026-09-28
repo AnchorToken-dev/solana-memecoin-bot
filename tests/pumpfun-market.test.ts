@@ -31,6 +31,7 @@ function baseCfg(over: Partial<BotConfig> = {}): BotConfig {
     runner: { pollIntervalMs: 1000, scanLimit: 10, maxCycles: 0 },
     maxHoldMinutes: 20,
     dailyLossUsd: 5,
+    chaseLockoutHours: 12,
     marketDataSource: "pumpfun",
     ledgerDir: "data",
     activePreset: "custom",

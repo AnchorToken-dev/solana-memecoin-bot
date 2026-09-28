@@ -13,6 +13,10 @@ import {
   canOpenAnother,
   isDailyLossBreached,
 } from "../risk/manager.js";
+import {
+  ChaseLockoutStore,
+  type ChaseLockoutStatus,
+} from "../risk/chaseLockout.js";
 import { log } from "../logging.js";
 import {
   applyPaperPatch,
@@ -47,6 +51,8 @@ export interface EngineStatus {
   lastCycleAt: number | null;
   marketDataSource: BotConfig["marketDataSource"];
   stopReason: string | null;
+  /** Paper chase lockout (laptop/API persisted). Timer-only unlock. */
+  chaseLockout: ChaseLockoutStatus;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -88,6 +94,8 @@ export class BotEngine {
   readonly journal: TradeJournal;
   readonly checklist: ResearchChecklistStore;
   readonly events: SessionEventBus;
+  /** Persisted chase lockout — lives on laptop/API, survives phone restarts. */
+  readonly chaseLockout: ChaseLockoutStore;
 
   private state: RunnerState = "stopped";
   private cycle = 0;
@@ -111,6 +119,7 @@ export class BotEngine {
       journal?: TradeJournal;
       checklist?: ResearchChecklistStore;
       events?: SessionEventBus;
+      chaseLockout?: ChaseLockoutStore;
       /** Absolute or relative path for runtime-config.json persistence. */
       runtimeConfigPath?: string;
     },
@@ -125,6 +134,8 @@ export class BotEngine {
     this.checklist =
       deps?.checklist ?? new ResearchChecklistStore(cfg.ledgerDir);
     this.events = deps?.events ?? new SessionEventBus();
+    this.chaseLockout =
+      deps?.chaseLockout ?? new ChaseLockoutStore(cfg.ledgerDir);
     this.runtimeConfigPath = deps?.runtimeConfigPath;
     // Backfill mint/CA on old journal rows from in-memory session fills
     // (disk trades.json already applied inside TradeJournal constructor).
@@ -152,6 +163,7 @@ export class BotEngine {
       lastCycleAt: this.lastCycleAt,
       marketDataSource: this.cfg.marketDataSource,
       stopReason: this.stopReason,
+      chaseLockout: this.chaseLockout.getStatus(),
     };
   }
 
@@ -273,7 +285,7 @@ export class BotEngine {
     });
     return {
       ok: true,
-      message: `Preset "${preset}" applied and saved to ${path} (bankroll $${this.cfg.bankrollUsd} / daily loss $${this.cfg.dailyLossUsd} / max position $${this.cfg.maxPositionUsd} kept sticky)`,
+      message: `Preset "${preset}" applied and saved to ${path} (bankroll $${this.cfg.bankrollUsd} / daily loss $${this.cfg.dailyLossUsd} / max position $${this.cfg.maxPositionUsd} / chase lockout ${this.cfg.chaseLockoutHours}h kept sticky)`,
       status: this.getStatus(),
       config: this.getPublicConfig(),
     };
@@ -496,6 +508,24 @@ export class BotEngine {
     return { events: this.events.since(sinceMs, limit) };
   }
 
+  getChaseLockout(): ChaseLockoutStatus {
+    return this.chaseLockout.getStatus();
+  }
+
+  /**
+   * Check ledger vs original deposit (cfg.bankrollUsd) and engage chase lockout
+   * when the full original deposit is gone. Paper preview for future live.
+   */
+  private maybeEngageChaseLockout(): ChaseLockoutStatus {
+    return this.chaseLockout.evaluateAndMaybeEngage({
+      realizedPnlUsd: this.ledger.realizedPnl,
+      cashUsd: this.ledger.cash,
+      openCount: this.ledger.openPositions.length,
+      originalDepositUsd: this.cfg.bankrollUsd,
+      lockoutHours: this.cfg.chaseLockoutHours,
+    });
+  }
+
   /** Record a closed paper trade into the learning journal (survives session reset). */
   private recordJournalClose(
     position: Position,
@@ -555,6 +585,19 @@ export class BotEngine {
         };
       }
     }
+    // Chase lockout is laptop/API-side — phone restart / Reset cannot bypass.
+    const lock = this.chaseLockout.getStatus();
+    if (lock.active) {
+      const until =
+        lock.unlockAt != null
+          ? new Date(lock.unlockAt).toISOString()
+          : "unknown";
+      return {
+        ok: false,
+        message: `Chase lockout active until ${until} (full original deposit lost). Reset does not clear this — wait for the timer. Paper preview for future live.`,
+        status: this.getStatus(),
+      };
+    }
     if (this.state === "running" || this.state === "starting") {
       return {
         ok: true,
@@ -610,7 +653,15 @@ export class BotEngine {
     }
     log.info("Paper runner stopped via engine");
     const reason = this.stopReason ?? "manual_stop";
-    if (String(reason).startsWith("daily_loss_cap")) {
+    if (String(reason).startsWith("chase_lockout")) {
+      const lock = this.chaseLockout.getStatus();
+      this.events.push(
+        "chase_lockout",
+        "Chase lockout",
+        reason,
+        { stopReason: reason, unlockAt: lock.unlockAt },
+      );
+    } else if (String(reason).startsWith("daily_loss_cap")) {
       this.events.push(
         "daily_loss_cap",
         "Daily loss cap hit",
@@ -667,14 +718,20 @@ export class BotEngine {
     this.stopReason = null;
 
     const portfolio = await this.getPortfolio();
+    const lock = this.chaseLockout.getStatus();
     log.info("Paper session reset", {
       cashUsd: portfolio.cashUsd,
       vaultUsd: portfolio.vaultUsd,
       tradeCount: portfolio.tradeCount,
+      chaseLockoutActive: lock.active,
+      chaseUnlockAt: lock.unlockAt,
     });
+    const lockNote = lock.active
+      ? `; chase lockout STILL ACTIVE until ${new Date(lock.unlockAt!).toISOString()} (Reset does not unlock — timer only)`
+      : "";
     return {
       ok: true,
-      message: `Paper session reset to $${this.cfg.bankrollUsd.toFixed(2)} bankroll (vault $${portfolio.vaultUsd.toFixed(2)} kept)`,
+      message: `Paper session reset to $${this.cfg.bankrollUsd.toFixed(2)} bankroll (vault $${portfolio.vaultUsd.toFixed(2)} kept)${lockNote}`,
       status: this.getStatus(),
       portfolio,
     };
@@ -755,11 +812,15 @@ export class BotEngine {
       };
     }
 
+    const lock = this.maybeEngageChaseLockout();
     const portfolio = await this.getPortfolio();
     const syms = fills.map((f) => f.symbol).join(", ");
+    const lockNote = lock.active
+      ? ` · chase lockout until ${new Date(lock.unlockAt!).toISOString()}`
+      : "";
     return {
       ok: true,
-      message: `Manual exit filled for ${syms}`,
+      message: `Manual exit filled for ${syms}${lockNote}`,
       status: this.getStatus(),
       portfolio,
       fills,
@@ -779,7 +840,17 @@ export class BotEngine {
     });
 
     while (!signal.aborted) {
+      const lockEarly = this.maybeEngageChaseLockout();
+      if (lockEarly.active) {
+        this.stopReason =
+          lockEarly.reason ??
+          `chase_lockout until ${new Date(lockEarly.unlockAt!).toISOString()}`;
+        log.warn(`Stopping runner: ${this.stopReason}`);
+        break;
+      }
       if (isDailyLossBreached(ledger.realizedPnl, cfg.dailyLossUsd)) {
+        // Full original-deposit wipe also arms chase lockout (reset won't unlock).
+        this.maybeEngageChaseLockout();
         this.stopReason = `daily_loss_cap (realized $${ledger.realizedPnl.toFixed(2)} ≤ −$${cfg.dailyLossUsd})`;
         log.warn(`Stopping runner: ${this.stopReason}`);
         break;
@@ -803,7 +874,16 @@ export class BotEngine {
         log.error("Cycle failed", err);
       }
 
+      const lockAfter = this.maybeEngageChaseLockout();
+      if (lockAfter.active) {
+        this.stopReason =
+          lockAfter.reason ??
+          `chase_lockout until ${new Date(lockAfter.unlockAt!).toISOString()}`;
+        log.warn(`Stopping runner: ${this.stopReason}`);
+        break;
+      }
       if (isDailyLossBreached(ledger.realizedPnl, cfg.dailyLossUsd)) {
+        this.maybeEngageChaseLockout();
         this.stopReason = `daily_loss_cap (realized $${ledger.realizedPnl.toFixed(2)} ≤ −$${cfg.dailyLossUsd})`;
         log.warn(`Stopping runner: ${this.stopReason}`);
         break;
@@ -825,7 +905,26 @@ export class BotEngine {
     const snap = ledger.snapshot(marks);
     log.info("Runner loop ended; portfolio", snap);
     const reason = this.stopReason;
-    if (reason && String(reason).startsWith("daily_loss_cap")) {
+    if (reason && String(reason).startsWith("chase_lockout")) {
+      const lock = this.chaseLockout.getStatus();
+      this.events.push(
+        "chase_lockout",
+        "Chase lockout",
+        reason,
+        {
+          stopReason: reason,
+          unlockAt: lock.unlockAt,
+          originalDepositUsd: lock.originalDepositUsd,
+          realizedPnlUsd: snap.realizedPnlUsd,
+        },
+      );
+      this.events.push(
+        "bot_stopped",
+        "Paper bot stopped",
+        reason,
+        { stopReason: reason },
+      );
+    } else if (reason && String(reason).startsWith("daily_loss_cap")) {
       this.events.push(
         "daily_loss_cap",
         "Daily loss cap hit",
@@ -881,7 +980,16 @@ export class BotEngine {
       }
     }
 
+    const lockTick = this.maybeEngageChaseLockout();
+    if (lockTick.active) {
+      this.stopReason =
+        lockTick.reason ??
+        `chase_lockout until ${new Date(lockTick.unlockAt!).toISOString()}`;
+      log.warn(`Stopping runner after exits: ${this.stopReason}`);
+      return true;
+    }
     if (isDailyLossBreached(ledger.realizedPnl, cfg.dailyLossUsd)) {
+      this.maybeEngageChaseLockout();
       this.stopReason = `daily_loss_cap (realized $${ledger.realizedPnl.toFixed(2)} ≤ −$${cfg.dailyLossUsd})`;
       log.warn(`Stopping runner after exits: ${this.stopReason}`);
       return true;
