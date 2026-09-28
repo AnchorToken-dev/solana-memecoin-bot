@@ -42,6 +42,7 @@ const ConfigSchema = z.object({
   }),
   maxHoldMinutes: z.number().nonnegative(),
   dailyLossUsd: z.number().nonnegative(),
+  chaseLockoutHours: z.number().nonnegative(),
   marketDataSource: z.enum(["mock", "dexscreener", "pumpfun"]),
   ledgerDir: z.string().min(1),
   activePreset: z.enum(["momentum", "sniper", "custom"]),
@@ -58,6 +59,8 @@ export const PaperPatchSchema = z
     maxPositionUsd: z.number().nonnegative().optional(),
     maxHoldMinutes: z.number().nonnegative().optional(),
     dailyLossUsd: z.number().nonnegative().optional(),
+    /** Paper chase lockout hours after full original-deposit loss (0 = off). Sticky. */
+    chaseLockoutHours: z.number().nonnegative().optional(),
     momentum: MomentumSchema.partial().optional(),
     trailingTakeProfit: TrailSchema.partial().optional(),
     runner: z
@@ -206,6 +209,7 @@ export function overlayFromConfig(cfg: BotConfig): RuntimeOverlay {
     maxPositionUsd: cfg.maxPositionUsd,
     maxHoldMinutes: cfg.maxHoldMinutes,
     dailyLossUsd: cfg.dailyLossUsd,
+    chaseLockoutHours: cfg.chaseLockoutHours,
     momentum: { ...cfg.momentum },
     trailingTakeProfit: { ...cfg.trailingTakeProfit },
     runner: {
@@ -231,6 +235,9 @@ function applyOverlay(cfg: BotConfig, overlay: RuntimeOverlay): void {
     cfg.maxHoldMinutes = overlay.maxHoldMinutes;
   }
   if (overlay.dailyLossUsd != null) cfg.dailyLossUsd = overlay.dailyLossUsd;
+  if (overlay.chaseLockoutHours != null) {
+    cfg.chaseLockoutHours = overlay.chaseLockoutHours;
+  }
   if (overlay.momentum) {
     cfg.momentum = { ...cfg.momentum, ...overlay.momentum };
   }
@@ -338,6 +345,9 @@ export function applyPaperPatch(cfg: BotConfig, patch: PaperConfigPatch): void {
   if (patch.maxPositionUsd != null) cfg.maxPositionUsd = patch.maxPositionUsd;
   if (patch.maxHoldMinutes != null) cfg.maxHoldMinutes = patch.maxHoldMinutes;
   if (patch.dailyLossUsd != null) cfg.dailyLossUsd = patch.dailyLossUsd;
+  if (patch.chaseLockoutHours != null) {
+    cfg.chaseLockoutHours = patch.chaseLockoutHours;
+  }
   if (patch.momentum) {
     cfg.momentum = { ...cfg.momentum, ...patch.momentum };
   }
@@ -370,6 +380,7 @@ export function applyPaperPatch(cfg: BotConfig, patch: PaperConfigPatch): void {
       patch.maxPositionUsd != null ||
       patch.maxHoldMinutes != null ||
       patch.dailyLossUsd != null ||
+      patch.chaseLockoutHours != null ||
       patch.momentum != null ||
       patch.trailingTakeProfit != null ||
       patch.runner != null;
@@ -445,6 +456,10 @@ export function loadConfig(opts?: {
       file.maxHoldMinutes ?? 20,
     ),
     dailyLossUsd: envNum("DAILY_LOSS_USD", file.dailyLossUsd ?? 5),
+    chaseLockoutHours: envNum(
+      "CHASE_LOCKOUT_HOURS",
+      file.chaseLockoutHours ?? 12,
+    ),
     marketDataSource: envStr(
       "MARKET_DATA_SOURCE",
       (file.marketDataSource as "mock" | "dexscreener" | "pumpfun") ?? "mock",

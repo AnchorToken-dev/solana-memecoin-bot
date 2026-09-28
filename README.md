@@ -17,7 +17,8 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 | Hard stop | `10%` | `STOP_LOSS_PCT` |
 | Hard take-profit | `+25%` from entry | `TAKE_PROFIT_PCT` (0 = off) |
 | Max hold (time stop) | `20` minutes | `MAX_HOLD_MINUTES` (0 = off) |
-| Daily loss cap | `$5` realized | `DAILY_LOSS_USD` (0 = off; stops runner) |
+| Daily loss cap | `$5` realized | `DAILY_LOSS_USD` (0 = off; stops runner; vs session PnL, not growing equity) |
+| Chase lockout | `12` hours after **full original deposit** loss | `CHASE_LOCKOUT_HOURS` (0 = off; laptop/API disk; Reset does not unlock) |
 | Position size | `95%` of **tradable** cash | `POSITION_SIZE_PCT` |
 | Max position (hard) | `$25` per open trade | `MAX_POSITION_USD` (0 = off; sticky) |
 | Momentum window | `5` minutes | `MOMENTUM_WINDOW_MINUTES` |
@@ -36,7 +37,7 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 
 ### Named presets (Momentum | Sniper)
 
-**Session risk is sticky:** applying Momentum or Sniper changes strategy knobs (stops, trail, TP, poll, liq/vol, min age, hold) but **preserves** current `bankrollUsd`, `dailyLossUsd`, and `maxPositionUsd` (e.g. Mark’s $100 / $25 daily loss / $25 max position). Edit those via PATCH `/config` or Settings Save.
+**Session risk is sticky:** applying Momentum or Sniper changes strategy knobs (stops, trail, TP, poll, liq/vol, min age, hold) but **preserves** current `bankrollUsd`, `dailyLossUsd`, `maxPositionUsd`, and `chaseLockoutHours` (e.g. Mark’s $100 / $25 daily loss / $25 max position / 12h chase lockout). Edit those via PATCH `/config` or Settings Save.
 
 **Vault / skim:** move paper profit into `vaultUsd` (`POST /vault/skim`) so sizing cannot use it. **Vault survives `/runner/reset`** (like journal). See [docs/vault-max-position.md](docs/vault-max-position.md). Journal P&L rollups: [docs/journal-pnl-summary.md](docs/journal-pnl-summary.md).
 
@@ -58,6 +59,7 @@ In-app / API presets for paper research. Apply via **Settings** tab or `POST /co
 | `MIN_AGE_MINUTES` | **3** | **0** (newer coins OK) |
 | `BANKROLL_USD` | 20 (sticky — not applied) | 20 (sticky) |
 | `DAILY_LOSS_USD` | 5 (sticky) | 5 (sticky) |
+| `CHASE_LOCKOUT_HOURS` | 12 (sticky) | 12 (sticky) |
 | `MAX_POSITION_USD` | 25 (sticky) | 25 (sticky) |
 | `POSITION_SIZE_PCT` | 0.95 | 0.95 |
 
@@ -71,9 +73,10 @@ Presets never change `PAPER_MODE`, `MARKET_DATA_SOURCE`, or ledger/wallet paths.
 4. **Time stop** — if held ≥ `MAX_HOLD_MINUTES`, sell (`time_stop`).
 5. **Trailing TP** — after unrealized gain ≥ `TRAIL_ACTIVATE_PCT`, arm a trail; sell if mark ≤ high-water × `(1 - TRAIL_DISTANCE_PCT/100)` (`trailing_take_profit`).
 6. **Manual exit** — `POST /runner/exit` (or `/position/exit`) / app **Exit now** (PnL tab) flattens the open paper position at the current mark (`manual_exit`).
-7. **Daily loss cap** — when session realized PnL ≤ `−DAILY_LOSS_USD`, the runner stops (no new paper entries). **Start does not clear the ledger** — use `POST /runner/reset` (or Start with `?reset=1`) / the app **Reset** button on the **PnL** tab to restore `BANKROLL_USD` cash and unlock another session.
-8. **Vault skim** — `POST /vault/skim` locks cash into `vaultUsd` (excluded from sizing). Survives Reset. Optional `POST /vault/return`.
-9. **Max position** — entry notional ≤ `MAX_POSITION_USD` (default `$25`) in addition to `POSITION_SIZE_PCT` × tradable cash.
+7. **Daily loss cap** — when session realized PnL ≤ `−DAILY_LOSS_USD`, the runner stops (no new paper entries). Cap is a fixed USD amount vs session realized PnL (**not** growing equity). **Start does not clear the ledger** — use `POST /runner/reset` (or Start with `?reset=1`) / the app **Reset** button on the **PnL** tab to restore `BANKROLL_USD` cash and clear the *daily-loss* stop.
+8. **Chase lockout** (paper preview for future live) — when session realized PnL ≤ `−BANKROLL_USD` (full loss of the **original deposit**, not peak equity), trading locks for `CHASE_LOCKOUT_HOURS` (default 12). Lock lives in `data/chase-lockout.json` on the laptop/API so phone restart cannot bypass. **Reset does not clear an active chase lockout** (timer-only unlock). See [docs/chase-lockout.md](docs/chase-lockout.md).
+9. **Vault skim** — `POST /vault/skim` locks cash into `vaultUsd` (excluded from sizing). Survives Reset. Optional `POST /vault/return`.
+10. **Max position** — entry notional ≤ `MAX_POSITION_USD` (default `$25`) in addition to `POSITION_SIZE_PCT` × tradable cash.
 
 ## Quick start (paper mode, Linux)
 
@@ -194,7 +197,7 @@ Location: `mobile/` — Vite + Capacitor Android shell. **No wallet / no private
      find laptop IP (`ip -4 addr` or `hostname -I`)  
      then API URL `http://<laptop-lan-ip>:8787`  
      (allow port 8787 in the laptop firewall if needed)
-3. **Status** / **Run** / **PnL** / **Check** / **Journal** / **Settings** tabs hit that API. **Start / Stop** on **Run**; **Exit now** / **Reset** / **Skim $ · Skim % · Return** on **PnL**; **Momentum | Sniper** + editable paper knobs (incl. sticky **Max position USD**) on **Settings** (stop runner before applying). Server must have `PAPER_MODE=true`. Reset clears the ledger and any `stopReason` (e.g. daily-loss lock) but **keeps the vault**. With an open position, **PnL** embeds a **DexScreener** live chart (`mint` from `/portfolio`); Pump.fun blocks iframes — use **Open on Pump.fun**. See `docs/pnl-chart.md` and `docs/vault-max-position.md`.
+3. **Status** / **Run** / **PnL** / **Check** / **Journal** / **Settings** tabs hit that API. **Start / Stop** on **Run**; **Exit now** / **Reset** / **Skim $ · Skim % · Return** on **PnL**; **Momentum | Sniper** + editable paper knobs (incl. sticky **Max position USD**) on **Settings** (stop runner before applying). Server must have `PAPER_MODE=true`. Reset clears the ledger and any daily-loss `stopReason` but **keeps the vault** and does **not** clear an active **chase lockout** (see `docs/chase-lockout.md`). With an open position, **PnL** embeds a **DexScreener** live chart (`mint` from `/portfolio`); Pump.fun blocks iframes — use **Open on Pump.fun**. See `docs/pnl-chart.md` and `docs/vault-max-position.md`.
 
 ### Build a debug APK on Linux
 
