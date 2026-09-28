@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BotEngine } from "../src/engine/botEngine.js";
@@ -149,6 +149,7 @@ describe("journal append on close + survives reset", () => {
     const before = engine.getJournal({ limit: 10 });
     assert.equal(before.total, 1);
     assert.equal(before.entries[0]!.exitReason, "manual_exit");
+    assert.equal(before.entries[0]!.mint, "mint1");
     assert.ok(before.entries[0]!.pnlUsd > 0);
 
     const noteRes = engine.updateJournalNote(
@@ -253,5 +254,181 @@ describe("journal HTTP API", () => {
       total: number;
     };
     assert.equal(listed.total, 0);
+  });
+});
+
+describe("journal mint / CA backfill", () => {
+  it("stores mint on appendClose", () => {
+    const dir = mkdtempSync(join(tmpdir(), "journal-mint-"));
+    try {
+      const j = new TradeJournal(dir);
+      const entry = j.appendClose({
+        position: {
+          id: "pos1",
+          mint: "So11111111111111111111111111111111111111112",
+          symbol: "WSOL",
+          side: "long",
+          qty: 1,
+          entryPrice: 1,
+          entryNotionalUsd: 10,
+          entryFeesUsd: 0,
+          highWaterPrice: 1,
+          trailArmed: false,
+          openedAt: 1_000,
+        },
+        exitPrice: 1.1,
+        pnlUsd: 1,
+        exitReason: "take_profit",
+        fillId: "fill1",
+        timestamp: 2_000,
+      });
+      assert.equal(entry.mint, "So11111111111111111111111111111111111111112");
+      assert.equal(j.list().entries[0]!.mint, entry.mint);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("backfills missing mint from fills by fillId then positionId", () => {
+    const dir = mkdtempSync(join(tmpdir(), "journal-bf-"));
+    try {
+      writeFileSync(
+        join(dir, "journal.json"),
+        JSON.stringify(
+          [
+            {
+              id: "j1",
+              timestamp: 3_000,
+              openedAt: 1_000,
+              mint: "",
+              symbol: "PEPE",
+              side: "long",
+              sizeUsd: 10,
+              entryPrice: 1,
+              exitPrice: 1.2,
+              pnlUsd: 2,
+              pnlPct: 20,
+              exitReason: "take_profit",
+              note: "",
+              positionId: "posA",
+              fillId: "fillA",
+            },
+            {
+              id: "j2",
+              timestamp: 4_000,
+              openedAt: 2_000,
+              // mint omitted entirely (legacy row)
+              symbol: "PEPE",
+              side: "long",
+              sizeUsd: 5,
+              entryPrice: 1,
+              exitPrice: 0.9,
+              pnlUsd: -0.5,
+              pnlPct: -10,
+              exitReason: "stop_loss",
+              note: "",
+              positionId: "posB",
+              fillId: "fillB",
+            },
+          ],
+          null,
+          2,
+        ) + "\n",
+      );
+      const j = new TradeJournal(dir);
+      assert.equal(j.list().total, 2);
+      // Both missing before backfill from explicit fills
+      const n = j.backfillMissingMints([
+        {
+          id: "fillA",
+          positionId: "posA",
+          mint: "MintAAA1111111111111111111111111111111111",
+        },
+        {
+          id: "fillOther",
+          positionId: "posB",
+          mint: "MintBBB2222222222222222222222222222222222",
+        },
+      ]);
+      assert.equal(n, 2);
+      const byId = Object.fromEntries(
+        j.list({ limit: 10 }).entries.map((e) => [e.id, e.mint]),
+      );
+      assert.equal(byId.j1, "MintAAA1111111111111111111111111111111111");
+      assert.equal(byId.j2, "MintBBB2222222222222222222222222222222222");
+
+      // Idempotent
+      assert.equal(
+        j.backfillMissingMints([
+          {
+            id: "fillA",
+            positionId: "posA",
+            mint: "MintAAA1111111111111111111111111111111111",
+          },
+        ]),
+        0,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("backfills from sibling trades.json on construct", () => {
+    const dir = mkdtempSync(join(tmpdir(), "journal-disk-bf-"));
+    try {
+      writeFileSync(
+        join(dir, "journal.json"),
+        JSON.stringify([
+          {
+            id: "jOld",
+            timestamp: 5_000,
+            openedAt: 4_000,
+            mint: "",
+            symbol: "DOGE",
+            side: "long",
+            sizeUsd: 8,
+            entryPrice: 1,
+            exitPrice: 1.5,
+            pnlUsd: 4,
+            pnlPct: 50,
+            exitReason: "manual_exit",
+            note: "",
+            positionId: "posDisk",
+            fillId: "fillDisk",
+          },
+        ]) + "\n",
+      );
+      writeFileSync(
+        join(dir, "trades.json"),
+        JSON.stringify([
+          {
+            fill: {
+              id: "fillDisk",
+              positionId: "posDisk",
+              mint: "DiskMint99999999999999999999999999999999",
+              symbol: "DOGE",
+              side: "sell",
+              qty: 8,
+              price: 1.5,
+              notionalUsd: 12,
+              feesUsd: 0,
+              slippageUsd: 0,
+              reason: "manual_exit",
+              timestamp: 5_000,
+              paper: true,
+            },
+            realizedPnlUsd: 4,
+            cashAfter: 104,
+          },
+        ]) + "\n",
+      );
+      const j = new TradeJournal(dir);
+      assert.equal(
+        j.list().entries[0]!.mint,
+        "DiskMint99999999999999999999999999999999",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
