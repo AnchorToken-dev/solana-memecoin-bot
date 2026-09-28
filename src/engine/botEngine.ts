@@ -126,6 +126,12 @@ export class BotEngine {
       deps?.checklist ?? new ResearchChecklistStore(cfg.ledgerDir);
     this.events = deps?.events ?? new SessionEventBus();
     this.runtimeConfigPath = deps?.runtimeConfigPath;
+    // Backfill mint/CA on old journal rows from in-memory session fills
+    // (disk trades.json already applied inside TradeJournal constructor).
+    const sessionFills = this.ledger.getTrades(10_000).map((t) => t.fill);
+    if (sessionFills.length > 0) {
+      this.journal.backfillMissingMints(sessionFills);
+    }
   }
 
   getStatus(): EngineStatus {

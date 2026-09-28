@@ -141,7 +141,7 @@ npm run api
 | PATCH / PUT | `/config` | **PAPER_MODE only**: update paper knobs (bankroll, max position, stops, trail, TP, momentum filters, min age, max hold, daily loss, poll). Persists `data/runtime-config.json`. **409** if runner running — stop first. Rejects `paperMode` / wallet / live fields |
 | POST | `/config/preset` | Body `{ "preset": "momentum" \| "sniper" }` — apply named preset + persist. **409** if runner running |
 | GET | `/trades?limit=50` | Recent fills (session ledger; cleared by Reset) |
-| GET | `/journal?limit=&offset=` | **Trade journal** — closed paper trades newest first (survives Reset) |
+| GET | `/journal?limit=&offset=` | **Trade journal** — closed paper trades newest first with **mint/CA** (survives Reset; old rows backfill mint from fills when possible) |
 | PATCH | `/journal/:id` | Body `{ "note": "…" }` — edit learning note |
 | DELETE | `/journal` | Explicit journal clear only (Reset does **not** clear journal) |
 | GET | `/alerts?since=` | Session events for phone local notifications (start/stop/open/close/daily loss) |
@@ -175,7 +175,7 @@ Ledger output (under `data/`):
 
 - `trades.json` — full fill records (session; cleared by Reset)  
 - `trades.csv` — spreadsheet-friendly log  
-- `journal.json` — append-only closed-trade journal + notes (survives Reset)  
+- `journal.json` — append-only closed-trade journal + notes + **mint/CA** (survives Reset; DexScreener links in Journal tab)  
 - `vault.json` — skimmed / vaulted USD (survives Reset; not used for sizing)  
 - Cash / positions / PnL printed each exit and at shutdown  
 

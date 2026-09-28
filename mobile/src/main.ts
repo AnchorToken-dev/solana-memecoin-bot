@@ -560,7 +560,7 @@ async function paintJournal(main: Element) {
   main.innerHTML = `
     <div class="card">
       <h2>Trade journal</h2>
-      <p class="muted">Closed paper trades with notes. Survives session <strong>Reset</strong> — clear only via button below.</p>
+      <p class="muted">Closed paper trades with notes + mint/CA. Survives session <strong>Reset</strong> — clear only via button below. Same-named coins are distinguished by CA; open DexScreener from each row.</p>
       <div class="row"><span class="k">Entries</span><span class="v">${escapeHtml(String(data.total))}</span></div>
       ${
         entries.length === 0
@@ -569,17 +569,31 @@ async function paintJournal(main: Element) {
               const pnlClass = e.pnlUsd >= 0 ? "pnl-pos" : "pnl-neg";
               const notePreview = e.note?.trim()
                 ? escapeHtml(e.note.trim().slice(0, 80))
-                : `<span class="muted">Tap to add note</span>`;
-              return `<button type="button" class="journal-row" data-jid="${escapeAttr(e.id)}" data-note="${escapeAttr(e.note ?? "")}">
+                : `<span class="muted">Tap note to add</span>`;
+              const mint = typeof e.mint === "string" ? e.mint.trim() : "";
+              const mintShort = truncateMint(mint);
+              const dexUrl = mint
+                ? `https://dexscreener.com/solana/${encodeURIComponent(mint)}`
+                : "";
+              const mintBlock = mint
+                ? `<div class="journal-mint">
+                    <span class="k">CA</span>
+                    <code class="mint-short" title="${escapeAttr(mint)}">${escapeHtml(mintShort)}</code>
+                    <button type="button" class="linkish copy-mint" data-mint="${escapeAttr(mint)}" title="Copy full mint">Copy</button>
+                    <a class="linkish" href="${escapeAttr(dexUrl)}" target="_blank" rel="noopener noreferrer">DexScreener</a>
+                  </div>`
+                : `<div class="journal-mint muted">CA unavailable (old row; will backfill from fills when possible)</div>`;
+              return `<div class="journal-row" data-jid="${escapeAttr(e.id)}">
                 <div class="journal-top">
-                  <strong>${escapeHtml(e.symbol)}</strong>
+                  <strong>${escapeHtml(e.symbol || mintShort || "—")}</strong>
                   <span class="${pnlClass}">${money(e.pnlUsd)} (${e.pnlPct >= 0 ? "+" : ""}${e.pnlPct.toFixed(1)}%)</span>
                 </div>
                 <div class="muted">${fmtTs(e.timestamp)} · ${escapeHtml(e.exitReason)}
                 · size ${money(e.sizeUsd)}
                 · ${escapeHtml(String(e.entryPrice))} → ${escapeHtml(String(e.exitPrice))}</div>
-                <div class="journal-note">${notePreview}</div>
-              </button>`;
+                ${mintBlock}
+                <button type="button" class="journal-note-btn" data-jid="${escapeAttr(e.id)}" data-note="${escapeAttr(e.note ?? "")}">${notePreview}</button>
+              </div>`;
             }).join("")
       }
       <div class="actions">
@@ -598,7 +612,19 @@ async function paintJournal(main: Element) {
       message = r.message;
     });
   });
-  main.querySelectorAll("button.journal-row").forEach((btn) => {
+  main.querySelectorAll("button.copy-mint").forEach((btn) => {
+    btn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const mint = (btn as HTMLButtonElement).dataset.mint ?? "";
+      void copyText(mint).then((ok) => {
+        message = ok ? "Mint copied" : "Could not copy mint";
+        error = "";
+        void render();
+      });
+    });
+  });
+  main.querySelectorAll("button.journal-note-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const id = (btn as HTMLButtonElement).dataset.jid ?? "";
       const prev = (btn as HTMLButtonElement).dataset.note ?? "";
@@ -828,6 +854,40 @@ async function softRefreshBankroll() {
   } catch {
     // Fall back to full render on soft-refresh failure.
     void render();
+  }
+}
+
+
+function truncateMint(mint: string): string {
+  const m = mint.trim();
+  if (!m) return "—";
+  if (m.length <= 12) return m;
+  return `${m.slice(0, 4)}…${m.slice(-4)}`;
+}
+
+async function copyText(text: string): Promise<boolean> {
+  if (!text) return false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* fall through */
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
   }
 }
 
