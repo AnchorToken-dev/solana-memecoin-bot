@@ -157,10 +157,38 @@ export const api = {
         pnlPct: number;
         exitReason: string;
         note: string;
+        quoteAsset?: string;
+        chainId?: string;
+        sizeQuote?: number | null;
+        pnlQuote?: number | null;
+        quoteUsdRate?: number | null;
+        quoteBasis?: string;
       }>;
       total: number;
       limit: number;
       offset: number;
+      summary?: {
+        timezone: string;
+        quoteAsset: string;
+        chainId: string;
+        estimateQuoteUsdRate: number | null;
+        note?: string;
+        periods: Array<{
+          period: string;
+          label: string;
+          fromMs: number;
+          toMs: number;
+          tradeCount: number;
+          winCount: number;
+          lossCount: number;
+          pnlUsd: number;
+          sizeUsd: number;
+          pnlQuote: number | null;
+          sizeQuote: number | null;
+          quoteAsset: string;
+          quoteBasis: string;
+        }>;
+      };
     }>(`/journal?limit=${limit}&offset=${offset}`),
   updateJournalNote: (id: string, note: string) =>
     request<{ ok: boolean; entry: { id: string; note: string }; message?: string }>(

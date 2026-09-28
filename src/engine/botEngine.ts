@@ -26,7 +26,13 @@ import {
   PRESET_NAMES,
   type PresetName,
 } from "../presets.js";
-import { TradeJournal, type JournalEntry } from "../journal/journal.js";
+import {
+  TradeJournal,
+  type JournalEntry,
+  DEFAULT_QUOTE_ASSET,
+  DEFAULT_CHAIN_ID,
+} from "../journal/journal.js";
+import { quoteUsdRateFromEnv } from "../market/data.js";
 import { ResearchChecklistStore } from "../checklist/checklist.js";
 import {
   SessionEventBus,
@@ -292,8 +298,12 @@ export class BotEngine {
     return this.ledger.getTrades(limit);
   }
 
-  getJournal(opts?: { limit?: number; offset?: number }) {
-    return this.journal.list(opts);
+  async getJournal(opts?: { limit?: number; offset?: number }) {
+    const estimateQuoteUsdRate = await this.resolveQuoteUsdRate();
+    return this.journal.list({
+      ...opts,
+      estimateQuoteUsdRate,
+    });
   }
 
   updateJournalNote(id: string, note: string) {
@@ -496,12 +506,28 @@ export class BotEngine {
     return { events: this.events.since(sinceMs, limit) };
   }
 
+  /** Best-effort SOL/USD (quote asset) for journal dual display. */
+  private async resolveQuoteUsdRate(): Promise<number | null> {
+    const fromEnv = quoteUsdRateFromEnv();
+    if (fromEnv != null) return fromEnv;
+    if (typeof this.market.getQuoteUsdRate === "function") {
+      try {
+        const r = await this.market.getQuoteUsdRate();
+        if (r != null && Number.isFinite(r) && r > 0) return r;
+      } catch (err) {
+        log.warn("getQuoteUsdRate failed; journal may be USD-only", err);
+      }
+    }
+    return null;
+  }
+
   /** Record a closed paper trade into the learning journal (survives session reset). */
-  private recordJournalClose(
+  private async recordJournalClose(
     position: Position,
     fill: Fill,
     realizedPnlUsd: number,
-  ): JournalEntry {
+  ): Promise<JournalEntry> {
+    const quoteUsdRate = await this.resolveQuoteUsdRate();
     const entry = this.journal.appendClose({
       position,
       exitPrice: fill.price,
@@ -509,6 +535,9 @@ export class BotEngine {
       exitReason: fill.reason ?? "unknown",
       fillId: fill.id,
       timestamp: fill.timestamp,
+      quoteUsdRate,
+      quoteAsset: DEFAULT_QUOTE_ASSET,
+      chainId: DEFAULT_CHAIN_ID,
     });
     const reason = fill.reason ?? "unknown";
     const pnlSign = realizedPnlUsd >= 0 ? "+" : "";
@@ -735,7 +764,7 @@ export class BotEngine {
         reason: "manual_exit",
       });
       this.ledger.recordSell(fill, realizedPnlUsd, proceedsUsd);
-      this.recordJournalClose(pos, fill, realizedPnlUsd);
+      await this.recordJournalClose(pos, fill, realizedPnlUsd);
       fills.push(fill);
       log.info("Manual paper exit", {
         symbol: pos.symbol,
@@ -877,7 +906,7 @@ export class BotEngine {
           reason: exit.reason,
         });
         ledger.recordSell(fill, realizedPnlUsd, proceedsUsd);
-        this.recordJournalClose(updated, fill, realizedPnlUsd);
+        await this.recordJournalClose(updated, fill, realizedPnlUsd);
       }
     }
 

@@ -259,6 +259,16 @@ export class PumpFunMarketData {
     return body as PumpCoin[];
   }
 
+  /**
+   * USD per 1 SOL — used by journal for quote-asset PnL at fill time.
+   * Prefer env SOL_USD_RATE / QUOTE_USD_RATE, else Pump.fun /sol-price, else cache/150.
+   */
+  async getQuoteUsdRate(): Promise<number | null> {
+    const fromEnv = Number(process.env.SOL_USD_RATE ?? process.env.QUOTE_USD_RATE);
+    if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
+    return this.fetchSolPriceUsd();
+  }
+
   private async fetchSolPriceUsd(): Promise<number> {
     const now = Date.now();
     if (this.solPriceCache && now - this.solPriceCache.at < 60_000) {

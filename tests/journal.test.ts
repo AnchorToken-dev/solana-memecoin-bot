@@ -93,6 +93,8 @@ describe("TradeJournal unit", () => {
       assert.equal(entry.symbol, "AAA");
       assert.equal(entry.pnlPct, 25);
       assert.equal(entry.note, "");
+      assert.equal(entry.quoteAsset, "SOL");
+      assert.equal(entry.quoteBasis, "usd_only");
       assert.equal(existsSync(join(dir, "journal.json")), true);
 
       const upd = j.updateNote(entry.id, "caught the pump");
@@ -146,7 +148,7 @@ describe("journal append on close + survives reset", () => {
 
     const exited = await engine.exitNow();
     assert.equal(exited.ok, true);
-    const before = engine.getJournal({ limit: 10 });
+    const before = await engine.getJournal({ limit: 10 });
     assert.equal(before.total, 1);
     assert.equal(before.entries[0]!.exitReason, "manual_exit");
     assert.equal(before.entries[0]!.mint, "mint1");
@@ -162,7 +164,7 @@ describe("journal append on close + survives reset", () => {
     assert.equal(reset.ok, true);
     assert.equal(reset.portfolio.tradeCount, 0);
 
-    const after = engine.getJournal({ limit: 10 });
+    const after = await engine.getJournal({ limit: 10 });
     assert.equal(after.total, 1, "journal must survive /runner/reset");
     assert.equal(after.entries[0]!.note, "good trail setup");
 
@@ -221,9 +223,20 @@ describe("journal HTTP API", () => {
     const body = (await res.json()) as {
       total: number;
       entries: Array<{ symbol: string; id: string }>;
+      summary: {
+        timezone: string;
+        quoteAsset: string;
+        periods: Array<{ period: string; tradeCount: number; pnlUsd: number }>;
+      };
     };
     assert.equal(body.total, 1);
     assert.equal(body.entries[0]!.symbol, "BBB");
+    assert.equal(body.summary.timezone, "America/New_York");
+    assert.equal(body.summary.quoteAsset, "SOL");
+    assert.equal(body.summary.periods.length, 4);
+    const overall = body.summary.periods.find((p) => p.period === "overall");
+    assert.ok(overall);
+    assert.equal(overall!.tradeCount, 1);
   });
 
   it("PATCH /journal/:id updates note", async () => {
@@ -427,6 +440,222 @@ describe("journal mint / CA backfill", () => {
         j.list().entries[0]!.mint,
         "DiskMint99999999999999999999999999999999",
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+
+describe("journal P&L summary + quote asset", () => {
+  it("records SOL amounts when quoteUsdRate is provided", () => {
+    const dir = mkdtempSync(join(tmpdir(), "journal-sol-"));
+    try {
+      const j = new TradeJournal(dir);
+      const entry = j.appendClose({
+        position: {
+          id: "pos1",
+          mint: "MintSOL",
+          symbol: "AAA",
+          side: "long",
+          qty: 10,
+          entryPrice: 1,
+          entryNotionalUsd: 100,
+          entryFeesUsd: 0,
+          highWaterPrice: 1.2,
+          trailArmed: false,
+          openedAt: 1_000,
+        },
+        exitPrice: 1.25,
+        pnlUsd: 25,
+        exitReason: "take_profit",
+        fillId: "fill1",
+        timestamp: 2_000,
+        quoteUsdRate: 200, // $200 / SOL
+      });
+      assert.equal(entry.quoteAsset, "SOL");
+      assert.equal(entry.quoteBasis, "recorded");
+      assert.equal(entry.quoteUsdRate, 200);
+      assert.equal(entry.sizeQuote, 0.5);
+      assert.equal(entry.pnlQuote, 0.125);
+
+      const listed = j.list({ estimateQuoteUsdRate: 200 });
+      const overall = listed.summary.periods.find((p) => p.period === "overall")!;
+      assert.equal(overall.pnlUsd, 25);
+      assert.equal(overall.pnlQuote, 0.125);
+      assert.equal(overall.quoteBasis, "recorded");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("estimates SOL for usd_only legacy rows using estimateQuoteUsdRate", () => {
+    const dir = mkdtempSync(join(tmpdir(), "journal-est-"));
+    try {
+      writeFileSync(
+        join(dir, "journal.json"),
+        JSON.stringify([
+          {
+            id: "jLegacy",
+            timestamp: Date.now(),
+            openedAt: Date.now() - 1000,
+            mint: "MintX",
+            symbol: "LEG",
+            side: "long",
+            sizeUsd: 50,
+            entryPrice: 1,
+            exitPrice: 1.1,
+            pnlUsd: 5,
+            pnlPct: 10,
+            exitReason: "take_profit",
+            note: "",
+            positionId: "p1",
+            fillId: "f1",
+          },
+        ]) + "\n",
+      );
+      const j = new TradeJournal(dir);
+      const e = j.list().entries[0]!;
+      assert.equal(e.quoteBasis, "usd_only");
+      assert.equal(e.pnlQuote, null);
+
+      const withEst = j.list({ estimateQuoteUsdRate: 100 });
+      const overall = withEst.summary.periods.find((p) => p.period === "overall")!;
+      assert.equal(overall.pnlUsd, 5);
+      assert.equal(overall.pnlQuote, 0.05);
+      assert.equal(overall.quoteBasis, "estimated");
+      assert.equal(withEst.summary.estimateQuoteUsdRate, 100);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls up daily / weekly / monthly / overall in America/New_York", () => {
+    const dir = mkdtempSync(join(tmpdir(), "journal-roll-"));
+    try {
+      const j = new TradeJournal(dir);
+      // Fixed "now": Wednesday 2026-09-23 15:00 America/New_York = 19:00 UTC
+      // (EDT, UTC-4)
+      const nowMs = Date.parse("2026-09-23T19:00:00.000Z");
+      // Today (Wed) close
+      j.appendClose({
+        position: {
+          id: "pToday",
+          mint: "m1",
+          symbol: "T",
+          side: "long",
+          qty: 1,
+          entryPrice: 1,
+          entryNotionalUsd: 10,
+          entryFeesUsd: 0,
+          highWaterPrice: 1,
+          trailArmed: false,
+          openedAt: nowMs - 60_000,
+        },
+        exitPrice: 1.1,
+        pnlUsd: 1,
+        exitReason: "take_profit",
+        fillId: "fToday",
+        timestamp: nowMs - 30_000,
+        quoteUsdRate: 100,
+      });
+      // Earlier this week (Monday) — still in Mon-week window
+      const mondayClose = Date.parse("2026-09-21T16:00:00.000Z"); // Mon 12:00 ET
+      j.appendClose({
+        position: {
+          id: "pMon",
+          mint: "m2",
+          symbol: "M",
+          side: "long",
+          qty: 1,
+          entryPrice: 1,
+          entryNotionalUsd: 20,
+          entryFeesUsd: 0,
+          highWaterPrice: 1,
+          trailArmed: false,
+          openedAt: mondayClose - 60_000,
+        },
+        exitPrice: 0.9,
+        pnlUsd: -2,
+        exitReason: "stop_loss",
+        fillId: "fMon",
+        timestamp: mondayClose,
+        quoteUsdRate: 100,
+      });
+      // Prior month (August) — overall only
+      const augClose = Date.parse("2026-08-15T16:00:00.000Z");
+      j.appendClose({
+        position: {
+          id: "pAug",
+          mint: "m3",
+          symbol: "A",
+          side: "long",
+          qty: 1,
+          entryPrice: 1,
+          entryNotionalUsd: 30,
+          entryFeesUsd: 0,
+          highWaterPrice: 1,
+          trailArmed: false,
+          openedAt: augClose - 60_000,
+        },
+        exitPrice: 1.2,
+        pnlUsd: 6,
+        exitReason: "manual_exit",
+        fillId: "fAug",
+        timestamp: augClose,
+        quoteUsdRate: 100,
+      });
+
+      const { summary } = j.list({ nowMs, timeZone: "America/New_York" });
+      const by = Object.fromEntries(summary.periods.map((p) => [p.period, p]));
+      assert.equal(by.daily!.tradeCount, 1);
+      assert.equal(by.daily!.pnlUsd, 1);
+      assert.equal(by.weekly!.tradeCount, 2); // Mon + Wed
+      assert.equal(by.weekly!.pnlUsd, -1);
+      assert.equal(by.monthly!.tradeCount, 2); // Sep only
+      assert.equal(by.monthly!.pnlUsd, -1);
+      assert.equal(by.overall!.tradeCount, 3);
+      assert.equal(by.overall!.pnlUsd, 5);
+      assert.ok(Math.abs((by.overall!.pnlQuote ?? 0) - 0.05) < 1e-9);
+      assert.equal(summary.timezone, "America/New_York");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("engine records quote rate from market.getQuoteUsdRate on close", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "journal-eng-sol-"));
+    try {
+      const prices = new Map([["mint1", 1.0]]);
+      const cfg = baseCfg({ ledgerDir: dir });
+      const market: MarketDataProvider = {
+        ...mockMarket(prices),
+        async getQuoteUsdRate() {
+          return 250;
+        },
+      };
+      const engine = new BotEngine(cfg, {
+        ledger: new PaperLedger(cfg.bankrollUsd, dir),
+        broker: new PaperBroker(cfg),
+        journal: new TradeJournal(dir),
+        market,
+      });
+      const { fill, position } = engine.broker.applyBuy({
+        mint: "mint1",
+        symbol: "SOLY",
+        markPrice: 1.0,
+        notionalUsd: 50,
+      });
+      engine.ledger.recordBuy(fill, position);
+      prices.set("mint1", 1.2);
+      await engine.exitNow();
+      const listed = await engine.getJournal({ limit: 5 });
+      assert.equal(listed.total, 1);
+      assert.equal(listed.entries[0]!.quoteBasis, "recorded");
+      assert.equal(listed.entries[0]!.quoteUsdRate, 250);
+      assert.ok(listed.entries[0]!.pnlQuote != null);
+      assert.ok(listed.entries[0]!.sizeQuote != null);
+      assert.equal(listed.summary.periods.find((p) => p.period === "overall")!.tradeCount, 1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

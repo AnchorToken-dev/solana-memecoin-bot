@@ -7,6 +7,20 @@ export interface MarketDataProvider {
   scan(limit: number): Promise<TokenSnapshot[]>;
   /** Latest price for an open position mint (may return null if unknown). */
   getPrice(mint: string): Promise<number | null>;
+  /**
+   * USD price of 1 unit of the chain quote asset (SOL today).
+   * Optional — journal records quote amounts at fill time when present.
+   * Multi-chain later: same hook, different quoteAsset.
+   */
+  getQuoteUsdRate?(): Promise<number | null>;
+}
+
+/** Resolve SOL/USD (or QUOTE_USD_RATE) from env; null if unset/invalid. */
+export function quoteUsdRateFromEnv(): number | null {
+  const raw = process.env.SOL_USD_RATE ?? process.env.QUOTE_USD_RATE;
+  if (raw == null || raw.trim() === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /** Deterministic mock provider — good for paper demos and unit tests. */
@@ -94,6 +108,10 @@ export class MockMarketData implements MarketDataProvider {
     // Peek current tick without advancing (exits checked before scan in the loop).
     const snaps = this.snapshotAt(this.tick, Date.now());
     return snaps.find((s) => s.mint === mint)?.priceUsd ?? null;
+  }
+
+  async getQuoteUsdRate(): Promise<number | null> {
+    return quoteUsdRateFromEnv() ?? 150;
   }
 }
 
@@ -183,6 +201,24 @@ export class DexScreenerMarketData implements MarketDataProvider {
     const snap = await this.fetchPair(mint);
     if (snap) return snap.priceUsd;
     return this.cache.get(mint) ?? null;
+  }
+
+  /**
+   * Best-effort SOL/USD via wrapped SOL pair on DexScreener.
+   * Falls back to env SOL_USD_RATE / QUOTE_USD_RATE.
+   */
+  async getQuoteUsdRate(): Promise<number | null> {
+    const fromEnv = quoteUsdRateFromEnv();
+    if (fromEnv != null) return fromEnv;
+    try {
+      // Native SOL wrapped mint — priceUsd ≈ SOL/USD.
+      const wsol = "So11111111111111111111111111111111111111112";
+      const snap = await this.fetchPair(wsol);
+      if (snap && snap.priceUsd > 0) return snap.priceUsd;
+    } catch {
+      /* ignore */
+    }
+    return null;
   }
 }
 

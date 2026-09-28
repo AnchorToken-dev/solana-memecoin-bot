@@ -171,6 +171,27 @@ input[type="number"] {
   font-variant-numeric: tabular-nums;
 }
 
+.journal-summary .summary-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+}
+.journal-summary .summary-cell {
+  background: #0f172a;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.journal-summary .summary-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
 .journal-row {
   display: block;
   width: 100%;

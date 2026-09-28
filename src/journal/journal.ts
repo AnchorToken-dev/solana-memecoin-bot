@@ -4,6 +4,10 @@
  *
  * Each closed row stores token mint (CA) so same-named coins stay
  * distinguishable and the mobile Journal can deep-link DexScreener.
+ *
+ * Amounts are USD-primary (paper bot) with optional quote-asset mirrors
+ * (SOL today; multi-chain via quoteAsset / chainId). P&L rollups use
+ * America/New_York calendar periods by default.
  */
 import {
   mkdirSync,
@@ -15,13 +19,25 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ExitReason, Fill, Position } from "../types.js";
 import { log } from "../logging.js";
+import {
+  JOURNAL_TZ_DEFAULT,
+  startOfDay,
+  startOfMonth,
+  startOfWeekMonday,
+} from "./timezone.js";
+
+/** Default chain quote asset for Solana paper bot (multi-chain later). */
+export const DEFAULT_QUOTE_ASSET = "SOL";
+export const DEFAULT_CHAIN_ID = "solana";
+
+export type QuoteBasis = "recorded" | "estimated" | "usd_only";
 
 export interface JournalEntry {
   id: string;
   /** Close timestamp (epoch ms). */
   timestamp: number;
   openedAt: number;
-  /** Solana token mint / contract address (CA). */
+  /** Token mint / contract address (CA). */
   mint: string;
   symbol: string;
   side: "long";
@@ -37,6 +53,58 @@ export interface JournalEntry {
   note: string;
   positionId: string;
   fillId: string;
+  /**
+   * Chain quote asset ticker for native sizing display (SOL now;
+   * later RHUSD / etc. — do not hard-wire UI to "SOL" forever).
+   */
+  quoteAsset: string;
+  /** Chain id for explorers / Dex links (solana now; multi-chain later). */
+  chainId: string;
+  /** Entry size in quote asset units, when known. */
+  sizeQuote: number | null;
+  /** Realized PnL in quote asset units, when known. */
+  pnlQuote: number | null;
+  /** USD per 1 quote unit at fill time (e.g. SOL/USD). */
+  quoteUsdRate: number | null;
+  /** How quote amounts were obtained. */
+  quoteBasis: QuoteBasis;
+}
+
+export type JournalPeriodKey = "daily" | "weekly" | "monthly" | "overall";
+
+export interface JournalPeriodSummary {
+  period: JournalPeriodKey;
+  /** Human label for mobile UI. */
+  label: string;
+  /** Inclusive period start (epoch ms); 0 for overall. */
+  fromMs: number;
+  /** Exclusive period end (epoch ms); now+epsilon for open-ended. */
+  toMs: number;
+  tradeCount: number;
+  winCount: number;
+  lossCount: number;
+  pnlUsd: number;
+  sizeUsd: number;
+  /** Sum of quote PnL (recorded + estimated); null if nothing convertible. */
+  pnlQuote: number | null;
+  sizeQuote: number | null;
+  quoteAsset: string;
+  /** Aggregate basis across rows in the window. */
+  quoteBasis: QuoteBasis | "mixed";
+}
+
+export interface JournalSummary {
+  timezone: string;
+  quoteAsset: string;
+  chainId: string;
+  /**
+   * Rate used to estimate quote amounts for usd_only / missing-rate rows.
+   * null when no estimate was applied.
+   */
+  estimateQuoteUsdRate: number | null;
+  periods: JournalPeriodSummary[];
+  /** Short note on how periods / quote amounts work. */
+  note: string;
 }
 
 export interface JournalListResult {
@@ -44,6 +112,7 @@ export interface JournalListResult {
   total: number;
   limit: number;
   offset: number;
+  summary: JournalSummary;
 }
 
 /** Minimal fill shape for mint backfill (session ledger / trades.json). */
@@ -58,10 +127,73 @@ function missingMint(mint: unknown): boolean {
   return typeof mint !== "string" || mint.trim() === "";
 }
 
+function asFiniteNumber(v: unknown): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  return v;
+}
+
+function normalizeQuoteBasis(raw: unknown): QuoteBasis {
+  if (raw === "recorded" || raw === "estimated" || raw === "usd_only") {
+    return raw;
+  }
+  return "usd_only";
+}
+
+function deriveQuoteAmounts(
+  sizeUsd: number,
+  pnlUsd: number,
+  quoteUsdRate: number | null | undefined,
+): {
+  sizeQuote: number | null;
+  pnlQuote: number | null;
+  quoteUsdRate: number | null;
+  quoteBasis: QuoteBasis;
+} {
+  const rate =
+    typeof quoteUsdRate === "number" &&
+    Number.isFinite(quoteUsdRate) &&
+    quoteUsdRate > 0
+      ? quoteUsdRate
+      : null;
+  if (rate == null) {
+    return {
+      sizeQuote: null,
+      pnlQuote: null,
+      quoteUsdRate: null,
+      quoteBasis: "usd_only",
+    };
+  }
+  return {
+    sizeQuote: sizeUsd / rate,
+    pnlQuote: pnlUsd / rate,
+    quoteUsdRate: rate,
+    quoteBasis: "recorded",
+  };
+}
+
 function normalizeEntry(raw: unknown): JournalEntry | null {
   if (raw == null || typeof raw !== "object") return null;
   const e = raw as Partial<JournalEntry>;
   if (typeof e.id !== "string" || typeof e.timestamp !== "number") return null;
+  const sizeUsd = typeof e.sizeUsd === "number" ? e.sizeUsd : 0;
+  const pnlUsd = typeof e.pnlUsd === "number" ? e.pnlUsd : 0;
+  const storedRate = asFiniteNumber(e.quoteUsdRate);
+  const storedSizeQ = asFiniteNumber(e.sizeQuote);
+  const storedPnlQ = asFiniteNumber(e.pnlQuote);
+  let quoteBasis = normalizeQuoteBasis(e.quoteBasis);
+  let quoteUsdRate = storedRate != null && storedRate > 0 ? storedRate : null;
+  let sizeQuote = storedSizeQ;
+  let pnlQuote = storedPnlQ;
+
+  // Legacy rows: only USD. Keep usd_only unless we already have quote fields.
+  if (quoteUsdRate == null && sizeQuote == null && pnlQuote == null) {
+    quoteBasis = "usd_only";
+  } else if (quoteUsdRate != null && (sizeQuote == null || pnlQuote == null)) {
+    sizeQuote = sizeUsd / quoteUsdRate;
+    pnlQuote = pnlUsd / quoteUsdRate;
+    if (quoteBasis === "usd_only") quoteBasis = "recorded";
+  }
+
   return {
     id: e.id,
     timestamp: e.timestamp,
@@ -69,15 +201,204 @@ function normalizeEntry(raw: unknown): JournalEntry | null {
     mint: typeof e.mint === "string" ? e.mint : "",
     symbol: typeof e.symbol === "string" ? e.symbol : "",
     side: "long",
-    sizeUsd: typeof e.sizeUsd === "number" ? e.sizeUsd : 0,
+    sizeUsd,
     entryPrice: typeof e.entryPrice === "number" ? e.entryPrice : 0,
     exitPrice: typeof e.exitPrice === "number" ? e.exitPrice : 0,
-    pnlUsd: typeof e.pnlUsd === "number" ? e.pnlUsd : 0,
+    pnlUsd,
     pnlPct: typeof e.pnlPct === "number" ? e.pnlPct : 0,
     exitReason: typeof e.exitReason === "string" ? e.exitReason : "unknown",
     note: typeof e.note === "string" ? e.note : "",
     positionId: typeof e.positionId === "string" ? e.positionId : "",
     fillId: typeof e.fillId === "string" ? e.fillId : "",
+    quoteAsset:
+      typeof e.quoteAsset === "string" && e.quoteAsset.trim()
+        ? e.quoteAsset.trim().toUpperCase()
+        : DEFAULT_QUOTE_ASSET,
+    chainId:
+      typeof e.chainId === "string" && e.chainId.trim()
+        ? e.chainId.trim().toLowerCase()
+        : DEFAULT_CHAIN_ID,
+    sizeQuote,
+    pnlQuote,
+    quoteUsdRate,
+    quoteBasis,
+  };
+}
+
+function quoteForEntry(
+  e: JournalEntry,
+  estimateRate: number | null,
+): {
+  sizeQuote: number | null;
+  pnlQuote: number | null;
+  basis: QuoteBasis;
+} {
+  if (
+    e.quoteBasis === "recorded" &&
+    e.pnlQuote != null &&
+    e.sizeQuote != null
+  ) {
+    return { sizeQuote: e.sizeQuote, pnlQuote: e.pnlQuote, basis: "recorded" };
+  }
+  if (e.pnlQuote != null && e.sizeQuote != null && e.quoteBasis === "estimated") {
+    return { sizeQuote: e.sizeQuote, pnlQuote: e.pnlQuote, basis: "estimated" };
+  }
+  const rate =
+    e.quoteUsdRate != null && e.quoteUsdRate > 0
+      ? e.quoteUsdRate
+      : estimateRate != null && estimateRate > 0
+        ? estimateRate
+        : null;
+  if (rate == null) {
+    return { sizeQuote: null, pnlQuote: null, basis: "usd_only" };
+  }
+  const basis: QuoteBasis =
+    e.quoteUsdRate != null && e.quoteUsdRate > 0 ? "recorded" : "estimated";
+  return {
+    sizeQuote: e.sizeUsd / rate,
+    pnlQuote: e.pnlUsd / rate,
+    basis,
+  };
+}
+
+function mergeBasis(
+  a: QuoteBasis | "mixed" | null,
+  b: QuoteBasis,
+): QuoteBasis | "mixed" {
+  if (a == null) return b;
+  if (a === b) return a;
+  return "mixed";
+}
+
+function buildPeriod(
+  period: JournalPeriodKey,
+  label: string,
+  fromMs: number,
+  toMs: number,
+  entries: JournalEntry[],
+  quoteAsset: string,
+  estimateRate: number | null,
+): JournalPeriodSummary {
+  let tradeCount = 0;
+  let winCount = 0;
+  let lossCount = 0;
+  let pnlUsd = 0;
+  let sizeUsd = 0;
+  let pnlQuoteSum = 0;
+  let sizeQuoteSum = 0;
+  let quoteRows = 0;
+  let basis: QuoteBasis | "mixed" | null = null;
+
+  for (const e of entries) {
+    if (e.timestamp < fromMs || e.timestamp >= toMs) continue;
+    tradeCount += 1;
+    pnlUsd += e.pnlUsd;
+    sizeUsd += e.sizeUsd;
+    if (e.pnlUsd > 0) winCount += 1;
+    else if (e.pnlUsd < 0) lossCount += 1;
+    const q = quoteForEntry(e, estimateRate);
+    basis = mergeBasis(basis, q.basis);
+    if (q.pnlQuote != null && q.sizeQuote != null) {
+      pnlQuoteSum += q.pnlQuote;
+      sizeQuoteSum += q.sizeQuote;
+      quoteRows += 1;
+    }
+  }
+
+  return {
+    period,
+    label,
+    fromMs,
+    toMs,
+    tradeCount,
+    winCount,
+    lossCount,
+    pnlUsd,
+    sizeUsd,
+    pnlQuote: quoteRows > 0 ? pnlQuoteSum : null,
+    sizeQuote: quoteRows > 0 ? sizeQuoteSum : null,
+    quoteAsset,
+    quoteBasis: basis ?? "usd_only",
+  };
+}
+
+export function computeJournalSummary(
+  entries: JournalEntry[],
+  opts?: {
+    nowMs?: number;
+    timeZone?: string;
+    quoteAsset?: string;
+    chainId?: string;
+    estimateQuoteUsdRate?: number | null;
+  },
+): JournalSummary {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const timeZone = opts?.timeZone ?? JOURNAL_TZ_DEFAULT;
+  const quoteAsset = opts?.quoteAsset ?? DEFAULT_QUOTE_ASSET;
+  const chainId = opts?.chainId ?? DEFAULT_CHAIN_ID;
+  const estimateQuoteUsdRate =
+    opts?.estimateQuoteUsdRate != null &&
+    Number.isFinite(opts.estimateQuoteUsdRate) &&
+    opts.estimateQuoteUsdRate > 0
+      ? opts.estimateQuoteUsdRate
+      : null;
+
+  const dayStart = startOfDay(nowMs, timeZone);
+  const weekStart = startOfWeekMonday(nowMs, timeZone);
+  const monthStart = startOfMonth(nowMs, timeZone);
+  const overallFrom =
+    entries.length > 0
+      ? Math.min(...entries.map((e) => e.timestamp))
+      : 0;
+
+  const periods: JournalPeriodSummary[] = [
+    buildPeriod(
+      "daily",
+      "Today",
+      dayStart,
+      nowMs + 1,
+      entries,
+      quoteAsset,
+      estimateQuoteUsdRate,
+    ),
+    buildPeriod(
+      "weekly",
+      "This week",
+      weekStart,
+      nowMs + 1,
+      entries,
+      quoteAsset,
+      estimateQuoteUsdRate,
+    ),
+    buildPeriod(
+      "monthly",
+      "This month",
+      monthStart,
+      nowMs + 1,
+      entries,
+      quoteAsset,
+      estimateQuoteUsdRate,
+    ),
+    buildPeriod(
+      "overall",
+      "Overall",
+      overallFrom,
+      nowMs + 1,
+      entries,
+      quoteAsset,
+      estimateQuoteUsdRate,
+    ),
+  ];
+
+  return {
+    timezone: timeZone,
+    quoteAsset,
+    chainId,
+    estimateQuoteUsdRate,
+    periods,
+    note:
+      "Periods are calendar day / Monday-week / month in America/New_York (or timezone). " +
+      "USD is primary; quote amounts use fill-time quoteUsdRate when recorded, else estimateQuoteUsdRate (marked estimated).",
   };
 }
 
@@ -102,7 +423,13 @@ export class TradeJournal {
     return this.path;
   }
 
-  list(opts?: { limit?: number; offset?: number }): JournalListResult {
+  list(opts?: {
+    limit?: number;
+    offset?: number;
+    nowMs?: number;
+    timeZone?: string;
+    estimateQuoteUsdRate?: number | null;
+  }): JournalListResult {
     const total = this.entries.length;
     const limitRaw = opts?.limit ?? 50;
     const offsetRaw = opts?.offset ?? 0;
@@ -114,11 +441,17 @@ export class TradeJournal {
       : 0;
     // Newest first
     const newestFirst = [...this.entries].reverse();
+    const summary = computeJournalSummary(this.entries, {
+      nowMs: opts?.nowMs,
+      timeZone: opts?.timeZone,
+      estimateQuoteUsdRate: opts?.estimateQuoteUsdRate,
+    });
     return {
       entries: newestFirst.slice(offset, offset + limit),
       total,
       limit,
       offset,
+      summary,
     };
   }
 
@@ -129,6 +462,7 @@ export class TradeJournal {
   /**
    * Append a closed-trade row. Call after a successful paper sell.
    * Always stores position.mint (CA) for DexScreener / disambiguation.
+   * When quoteUsdRate is provided, stores quote-asset size/PnL as recorded.
    */
   appendClose(args: {
     position: Position;
@@ -138,10 +472,18 @@ export class TradeJournal {
     fillId: string;
     timestamp?: number;
     note?: string;
+    /** USD per 1 quote unit at fill time (SOL/USD). */
+    quoteUsdRate?: number | null;
+    quoteAsset?: string;
+    chainId?: string;
   }): JournalEntry {
     const sizeUsd = args.position.entryNotionalUsd;
-    const pnlPct =
-      sizeUsd > 0 ? (args.pnlUsd / sizeUsd) * 100 : 0;
+    const pnlPct = sizeUsd > 0 ? (args.pnlUsd / sizeUsd) * 100 : 0;
+    const derived = deriveQuoteAmounts(
+      sizeUsd,
+      args.pnlUsd,
+      args.quoteUsdRate,
+    );
     const entry: JournalEntry = {
       id: randomUUID(),
       timestamp: args.timestamp ?? Date.now(),
@@ -158,6 +500,12 @@ export class TradeJournal {
       note: args.note ?? "",
       positionId: args.position.id,
       fillId: args.fillId,
+      quoteAsset: (args.quoteAsset ?? DEFAULT_QUOTE_ASSET).toUpperCase(),
+      chainId: (args.chainId ?? DEFAULT_CHAIN_ID).toLowerCase(),
+      sizeQuote: derived.sizeQuote,
+      pnlQuote: derived.pnlQuote,
+      quoteUsdRate: derived.quoteUsdRate,
+      quoteBasis: derived.quoteBasis,
     };
     this.entries.push(entry);
     this.persist();
@@ -166,6 +514,9 @@ export class TradeJournal {
       symbol: entry.symbol,
       mint: entry.mint,
       pnlUsd: entry.pnlUsd,
+      pnlQuote: entry.pnlQuote,
+      quoteAsset: entry.quoteAsset,
+      quoteBasis: entry.quoteBasis,
       reason: entry.exitReason,
     });
     return entry;
