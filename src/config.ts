@@ -28,6 +28,7 @@ const ConfigSchema = z.object({
   stopLossPct: z.number().positive(),
   takeProfitPct: z.number().nonnegative(),
   positionSizePct: z.number().gt(0).lte(1),
+  maxPositionUsd: z.number().nonnegative(),
   momentum: MomentumSchema,
   trailingTakeProfit: TrailSchema,
   paperBroker: z.object({
@@ -54,6 +55,7 @@ export const PaperPatchSchema = z
     stopLossPct: z.number().positive().optional(),
     takeProfitPct: z.number().nonnegative().optional(),
     positionSizePct: z.number().gt(0).lte(1).optional(),
+    maxPositionUsd: z.number().nonnegative().optional(),
     maxHoldMinutes: z.number().nonnegative().optional(),
     dailyLossUsd: z.number().nonnegative().optional(),
     momentum: MomentumSchema.partial().optional(),
@@ -201,6 +203,7 @@ export function overlayFromConfig(cfg: BotConfig): RuntimeOverlay {
     stopLossPct: cfg.stopLossPct,
     takeProfitPct: cfg.takeProfitPct,
     positionSizePct: cfg.positionSizePct,
+    maxPositionUsd: cfg.maxPositionUsd,
     maxHoldMinutes: cfg.maxHoldMinutes,
     dailyLossUsd: cfg.dailyLossUsd,
     momentum: { ...cfg.momentum },
@@ -220,6 +223,9 @@ function applyOverlay(cfg: BotConfig, overlay: RuntimeOverlay): void {
   if (overlay.takeProfitPct != null) cfg.takeProfitPct = overlay.takeProfitPct;
   if (overlay.positionSizePct != null) {
     cfg.positionSizePct = overlay.positionSizePct;
+  }
+  if (overlay.maxPositionUsd != null) {
+    cfg.maxPositionUsd = overlay.maxPositionUsd;
   }
   if (overlay.maxHoldMinutes != null) {
     cfg.maxHoldMinutes = overlay.maxHoldMinutes;
@@ -265,7 +271,7 @@ function matchesPreset(
   cfg: BotConfig,
   knobs: (typeof PRESETS)[PresetName],
 ): boolean {
-  // Strategy knobs only — bankroll / daily loss are session risk and sticky.
+  // Strategy knobs only — bankroll / daily loss / max position are session risk and sticky.
   return (
     cfg.stopLossPct === knobs.stopLossPct &&
     cfg.takeProfitPct === knobs.takeProfitPct &&
@@ -329,6 +335,7 @@ export function applyPaperPatch(cfg: BotConfig, patch: PaperConfigPatch): void {
   if (patch.stopLossPct != null) cfg.stopLossPct = patch.stopLossPct;
   if (patch.takeProfitPct != null) cfg.takeProfitPct = patch.takeProfitPct;
   if (patch.positionSizePct != null) cfg.positionSizePct = patch.positionSizePct;
+  if (patch.maxPositionUsd != null) cfg.maxPositionUsd = patch.maxPositionUsd;
   if (patch.maxHoldMinutes != null) cfg.maxHoldMinutes = patch.maxHoldMinutes;
   if (patch.dailyLossUsd != null) cfg.dailyLossUsd = patch.dailyLossUsd;
   if (patch.momentum) {
@@ -360,6 +367,7 @@ export function applyPaperPatch(cfg: BotConfig, patch: PaperConfigPatch): void {
       patch.stopLossPct != null ||
       patch.takeProfitPct != null ||
       patch.positionSizePct != null ||
+      patch.maxPositionUsd != null ||
       patch.maxHoldMinutes != null ||
       patch.dailyLossUsd != null ||
       patch.momentum != null ||
@@ -383,6 +391,7 @@ export function loadConfig(opts?: {
     stopLossPct: envNum("STOP_LOSS_PCT", file.stopLossPct ?? 10),
     takeProfitPct: envNum("TAKE_PROFIT_PCT", file.takeProfitPct ?? 25),
     positionSizePct: envNum("POSITION_SIZE_PCT", file.positionSizePct ?? 0.95),
+    maxPositionUsd: envNum("MAX_POSITION_USD", file.maxPositionUsd ?? 25),
     momentum: {
       minPct: envNum("MOMENTUM_MIN_PCT", file.momentum?.minPct ?? 8),
       windowMinutes: envNum(

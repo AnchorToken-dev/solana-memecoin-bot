@@ -54,9 +54,15 @@ export const api = {
   portfolio: () =>
     request<{
       bankrollUsd: number;
+      maxPositionUsd?: number;
+      vaultUsd?: number;
+      tradableCashUsd?: number;
       portfolio: {
         cashUsd: number;
+        tradableCashUsd?: number;
+        vaultUsd?: number;
         equityUsd: number;
+        totalEquityUsd?: number;
         realizedPnlUsd: number;
         unrealizedPnlUsd: number;
         tradeCount: number;
@@ -72,6 +78,23 @@ export const api = {
         }>;
       };
     }>("/portfolio"),
+  vaultSkim: (body: { amountUsd?: number; percentOfProfit?: number }) =>
+    request<{
+      ok: boolean;
+      message: string;
+      skimmedUsd?: number;
+      portfolio?: Record<string, unknown>;
+    }>("/vault/skim", { method: "POST", body: JSON.stringify(body) }),
+  vaultReturn: (amountUsd: number) =>
+    request<{
+      ok: boolean;
+      message: string;
+      returnedUsd?: number;
+      portfolio?: Record<string, unknown>;
+    }>("/vault/return", {
+      method: "POST",
+      body: JSON.stringify({ amountUsd }),
+    }),
   trades: (limit = 40) =>
     request<{ trades: Array<{ fill: Record<string, unknown>; realizedPnlUsd?: number; cashAfter: number }> }>(
       `/trades?limit=${limit}`,
