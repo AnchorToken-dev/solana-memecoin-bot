@@ -20,6 +20,12 @@
 
 import type { TokenSnapshot } from "../types.js";
 import { log } from "../logging.js";
+import {
+  fetchWithTimeout,
+  isAbortError,
+  marketHttpTimeoutMs,
+  type FetchLike as HttpFetchLike,
+} from "./http.js";
 
 export const PUMPFUN_FRONTEND_API_BASE_DEFAULT =
   "https://frontend-api-v3.pump.fun";
@@ -27,10 +33,8 @@ export const PUMPFUN_FRONTEND_API_BASE_DEFAULT =
 /** DexScreener ids that map to Pump.fun bonding curve / PumpSwap AMM. */
 export const PUMP_DEX_IDS = new Set(["pumpfun", "pumpswap"]);
 
-export type FetchLike = (
-  input: string,
-  init?: RequestInit,
-) => Promise<Response>;
+/** @deprecated prefer HttpFetchLike from ./http.js — kept for test inject API. */
+export type FetchLike = HttpFetchLike;
 
 export interface PumpFunMarketOptions {
   /** Override frontend-api base (no trailing slash). */
@@ -45,6 +49,8 @@ export interface PumpFunMarketOptions {
   enrichDelayMs?: number;
   /** Momentum window used for in-memory % change when Dex has no m5. */
   windowMinutes?: number;
+  /** Per-request HTTP timeout ms (default MARKET_HTTP_TIMEOUT_MS / 8000). */
+  httpTimeoutMs?: number;
 }
 
 interface PumpCoin {
@@ -132,6 +138,7 @@ export class PumpFunMarketData {
   private readonly dexEnrich: boolean;
   private readonly enrichDelayMs: number;
   private readonly windowMs: number;
+  private readonly httpTimeoutMs: number;
   private readonly priceHistory = new Map<string, PriceSample[]>();
   private readonly priceCache = new Map<string, number>();
   private solPriceCache: { usd: number; at: number } | null = null;
@@ -146,6 +153,20 @@ export class PumpFunMarketData {
     this.dexEnrich = opts.dexEnrich ?? true;
     this.enrichDelayMs = opts.enrichDelayMs ?? 120;
     this.windowMs = (opts.windowMinutes ?? 5) * 60_000;
+    this.httpTimeoutMs = opts.httpTimeoutMs ?? marketHttpTimeoutMs();
+  }
+
+  /** Timed fetch — never hang the runner on a stuck CF / Dex socket. */
+  private async http(
+    input: string,
+    init?: RequestInit,
+  ): Promise<Response> {
+    return fetchWithTimeout(
+      input,
+      init,
+      this.httpTimeoutMs,
+      this.fetchImpl,
+    );
   }
 
   async scan(limit: number): Promise<TokenSnapshot[]> {
@@ -178,28 +199,28 @@ export class PumpFunMarketData {
   }
 
   async getPrice(mint: string): Promise<number | null> {
-    // Prefer live list / cache; then DexScreener token endpoint.
-    if (this.priceCache.has(mint)) {
-      // Refresh opportunistically via Dex when enrich is on.
-      if (this.dexEnrich) {
+    // Cache-first: never block exit checks forever on a hung Dex refresh.
+    // A timed-out / failed enrich falls back to the last known paper mark.
+    const cached = this.priceCache.get(mint);
+    if (this.dexEnrich) {
+      try {
         const enriched = await this.fetchDexPairForMint(mint);
         if (enriched?.priceUsd) {
           this.priceCache.set(mint, enriched.priceUsd);
           this.recordPrice(mint, enriched.priceUsd);
           return enriched.priceUsd;
         }
+      } catch (err) {
+        if (isAbortError(err)) {
+          log.warn(
+            `getPrice Dex refresh timed out for ${mint.slice(0, 8)}…; using cache`,
+          );
+        } else {
+          log.warn(`getPrice Dex refresh failed for ${mint.slice(0, 8)}…; using cache`, err);
+        }
       }
-      return this.priceCache.get(mint) ?? null;
     }
-    if (this.dexEnrich) {
-      const enriched = await this.fetchDexPairForMint(mint);
-      if (enriched?.priceUsd) {
-        this.priceCache.set(mint, enriched.priceUsd);
-        this.recordPrice(mint, enriched.priceUsd);
-        return enriched.priceUsd;
-      }
-    }
-    return null;
+    return cached ?? null;
   }
 
   /** Exposed for tests / dry-run. */
@@ -248,7 +269,7 @@ export class PumpFunMarketData {
       q.set("complete", String(params.complete));
     }
     const url = `${this.apiBase}/coins?${q.toString()}`;
-    const res = await this.fetchImpl(url, { headers: BROWSERISH_HEADERS });
+    const res = await this.http(url, { headers: BROWSERISH_HEADERS });
     if (!res.ok) {
       throw new Error(`Pump.fun coins HTTP ${res.status} for ${url}`);
     }
@@ -275,7 +296,7 @@ export class PumpFunMarketData {
       return this.solPriceCache.usd;
     }
     try {
-      const res = await this.fetchImpl(`${this.apiBase}/sol-price`, {
+      const res = await this.http(`${this.apiBase}/sol-price`, {
         headers: BROWSERISH_HEADERS,
       });
       if (res.ok) {
@@ -375,7 +396,10 @@ export class PumpFunMarketData {
         } else {
           out.push(s);
         }
-      } catch {
+      } catch (err) {
+        if (isAbortError(err)) {
+          log.warn(`Dex enrich timed out for ${s.symbol}; keeping pump fields`);
+        }
         out.push(s);
       }
       if (this.enrichDelayMs > 0) await sleep(this.enrichDelayMs);
@@ -391,7 +415,7 @@ export class PumpFunMarketData {
     volume24hUsd: number;
     liquidityUsd: number;
   } | null> {
-    const res = await this.fetchImpl(
+    const res = await this.http(
       `https://api.dexscreener.com/latest/dex/tokens/${mint}`,
       { headers: { accept: "application/json" } },
     );
@@ -440,7 +464,7 @@ export class PumpFunMarketData {
 
     for (const q of queries) {
       try {
-        const res = await this.fetchImpl(
+        const res = await this.http(
           `https://api.dexscreener.com/latest/dex/search?q=${encodeURIComponent(q)}`,
           { headers: { accept: "application/json" } },
         );
