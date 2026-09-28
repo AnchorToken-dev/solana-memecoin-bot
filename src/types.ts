@@ -62,9 +62,16 @@ export interface BotConfig {
   maxHoldMinutes: number;
   /**
    * Stop the runner when session realized PnL ≤ −this USD amount.
-   * 0 = disabled.
+   * 0 = disabled. Measured against session realized PnL (not growing equity).
    */
   dailyLossUsd: number;
+  /**
+   * Paper chase-lockout cool-down hours after a FULL loss of the original
+   * deposit/bankroll (cfg.bankrollUsd), not peak equity. Default 12.
+   * 0 = disabled. Persisted on laptop/API (data/chase-lockout.json).
+   * Reset does NOT clear an active lockout — timer-only unlock.
+   */
+  chaseLockoutHours: number;
   marketDataSource: "mock" | "dexscreener" | "pumpfun";
   ledgerDir: string;
   /**

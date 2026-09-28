@@ -8,6 +8,7 @@ export type SessionEventType =
   | "position_opened"
   | "position_closed"
   | "daily_loss_cap"
+  | "chase_lockout"
   | "exit_take_profit"
   | "exit_stop_loss"
   | "exit_trail"

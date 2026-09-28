@@ -34,6 +34,7 @@ function baseCfg(over: Partial<BotConfig> = {}): BotConfig {
     runner: { pollIntervalMs: 50, scanLimit: 5, maxCycles: 0 },
     maxHoldMinutes: 0,
     dailyLossUsd: 25,
+    chaseLockoutHours: 12,
     marketDataSource: "mock",
     ledgerDir: "data",
     activePreset: "custom",

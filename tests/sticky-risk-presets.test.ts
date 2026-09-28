@@ -26,6 +26,7 @@ function baseCfg(over: Partial<BotConfig> = {}): BotConfig {
     runner: { pollIntervalMs: 15_000, scanLimit: 5, maxCycles: 0 },
     maxHoldMinutes: 20,
     dailyLossUsd: 25,
+    chaseLockoutHours: 12,
     marketDataSource: "mock",
     ledgerDir: "data",
     activePreset: "momentum",
@@ -49,6 +50,7 @@ describe("sticky session risk across presets", () => {
     assert.equal(cfg.bankrollUsd, 100, "bankroll must stay sticky");
     assert.equal(cfg.dailyLossUsd, 25, "daily loss must stay sticky");
     assert.equal(cfg.maxPositionUsd, 25, "max position must stay sticky");
+    assert.equal(cfg.chaseLockoutHours, 12, "chase lockout hours must stay sticky");
 
     applyPresetKnobs(cfg, "momentum");
     assert.equal(cfg.activePreset, "momentum");
