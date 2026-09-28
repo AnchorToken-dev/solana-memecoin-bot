@@ -1,6 +1,11 @@
 import type { BotConfig, TokenSnapshot } from "../types.js";
 import { log } from "../logging.js";
 import { PumpFunMarketData } from "./pumpfun.js";
+import {
+  fetchWithTimeout,
+  isAbortError,
+  marketHttpTimeoutMs,
+} from "./http.js";
 
 export interface MarketDataProvider {
   /** Return candidate tokens for the momentum scan. */
@@ -121,11 +126,20 @@ export class MockMarketData implements MarketDataProvider {
  */
 export class DexScreenerMarketData implements MarketDataProvider {
   private cache = new Map<string, number>();
+  private readonly httpTimeoutMs: number;
+
+  constructor(opts?: { httpTimeoutMs?: number }) {
+    this.httpTimeoutMs = opts?.httpTimeoutMs ?? marketHttpTimeoutMs();
+  }
+
+  private async http(input: string, init?: RequestInit): Promise<Response> {
+    return fetchWithTimeout(input, init, this.httpTimeoutMs);
+  }
 
   async scan(limit: number): Promise<TokenSnapshot[]> {
     const url = "https://api.dexscreener.com/token-boosts/top/v1";
     try {
-      const res = await fetch(url, {
+      const res = await this.http(url, {
         headers: { accept: "application/json" },
       });
       if (!res.ok) {
@@ -156,7 +170,7 @@ export class DexScreenerMarketData implements MarketDataProvider {
 
   private async fetchPair(mint: string): Promise<TokenSnapshot | null> {
     try {
-      const res = await fetch(
+      const res = await this.http(
         `https://api.dexscreener.com/latest/dex/tokens/${mint}`,
         { headers: { accept: "application/json" } },
       );
@@ -198,9 +212,18 @@ export class DexScreenerMarketData implements MarketDataProvider {
   }
 
   async getPrice(mint: string): Promise<number | null> {
-    const snap = await this.fetchPair(mint);
-    if (snap) return snap.priceUsd;
-    return this.cache.get(mint) ?? null;
+    const cached = this.cache.get(mint);
+    try {
+      const snap = await this.fetchPair(mint);
+      if (snap) return snap.priceUsd;
+    } catch (err) {
+      if (isAbortError(err)) {
+        log.warn(`DexScreener getPrice timed out for ${mint.slice(0, 8)}…; using cache`);
+      } else {
+        log.warn(`DexScreener getPrice failed for ${mint.slice(0, 8)}…; using cache`, err);
+      }
+    }
+    return cached ?? null;
   }
 
   /**
@@ -242,6 +265,7 @@ export function createMarketData(cfg: BotConfig): MarketDataProvider {
       dexFallback,
       dexEnrich,
       windowMinutes: cfg.momentum.windowMinutes,
+      httpTimeoutMs: marketHttpTimeoutMs(),
     });
   }
   if (cfg.marketDataSource === "dexscreener") {

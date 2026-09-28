@@ -12,6 +12,7 @@ import {
   sizePosition,
   canOpenAnother,
   isDailyLossBreached,
+  isMaxHoldExceeded,
 } from "../risk/manager.js";
 import {
   ChaseLockoutStore,
@@ -55,6 +56,8 @@ export interface EngineStatus {
   uptimeMs: number;
   lastError: string | null;
   lastCycleAt: number | null;
+  /** Ms since last completed tick while running (null if never ticked / not running). */
+  cycleAgeMs: number | null;
   marketDataSource: BotConfig["marketDataSource"];
   stopReason: string | null;
   /** Paper chase lockout (laptop/API persisted). Timer-only unlock. */
@@ -167,6 +170,10 @@ export class BotEngine {
             : 0,
       lastError: this.lastError,
       lastCycleAt: this.lastCycleAt,
+      cycleAgeMs:
+        this.state === "running" && this.lastCycleAt != null
+          ? now - this.lastCycleAt
+          : null,
       marketDataSource: this.cfg.marketDataSource,
       stopReason: this.stopReason,
       chaseLockout: this.chaseLockout.getStatus(),
@@ -678,7 +685,23 @@ export class BotEngine {
     this.stopReason = this.stopReason ?? "manual_stop";
     this.abort?.abort();
     if (this.loopPromise) {
-      await this.loopPromise.catch(() => undefined);
+      // Market HTTP now times out, but still bound stop wait so the control
+      // API cannot wedge if a tick is mid-flight.
+      const STOP_WAIT_MS = 60_000;
+      let timedOut = false;
+      await Promise.race([
+        this.loopPromise.catch(() => undefined),
+        sleep(STOP_WAIT_MS).then(() => {
+          timedOut = true;
+        }),
+      ]);
+      if (timedOut) {
+        log.warn(
+          `stop(): runner loop still busy after ${STOP_WAIT_MS}ms (likely hung market HTTP); forcing stopped state`,
+        );
+        this.state = "stopped";
+        this.stoppedAt = Date.now();
+      }
     }
     log.info("Paper runner stopped via engine");
     const reason = this.stopReason ?? "manual_stop";
@@ -805,15 +828,23 @@ export class BotEngine {
       if (!this.ledger.openPositions.some((p) => p.id === pos.id)) {
         continue;
       }
-      const mark = await this.market.getPrice(pos.mint);
+      let mark = await this.market.getPrice(pos.mint);
       if (mark == null || !(mark > 0)) {
-        const portfolio = await this.getPortfolio();
-        return {
-          ok: false,
-          message: `No mark price for ${pos.symbol} (${pos.mint}); cannot exit`,
-          status: this.getStatus(),
-          portfolio,
-        };
+        // Prefer flattening with last HWM / entry over wedging maxOpen=1.
+        mark =
+          pos.highWaterPrice > 0 ? pos.highWaterPrice : pos.entryPrice;
+        log.warn(
+          `No live mark for manual exit ${pos.symbol}; using fallback mark ${mark}`,
+        );
+        if (!(mark > 0)) {
+          const portfolio = await this.getPortfolio();
+          return {
+            ok: false,
+            message: `No mark price for ${pos.symbol} (${pos.mint}); cannot exit`,
+            status: this.getStatus(),
+            portfolio,
+          };
+        }
       }
       const { fill, proceedsUsd, realizedPnlUsd } = this.broker.applySell({
         position: pos,
@@ -984,10 +1015,22 @@ export class BotEngine {
     const snaps = await market.scan(cfg.runner.scanLimit);
 
     for (const pos of ledger.openPositions) {
-      const mark = await markFor(pos.mint, snaps, market);
+      let mark = await markFor(pos.mint, snaps, market);
       if (mark == null) {
-        log.warn(`No mark for ${pos.symbol}; skipping exit check`);
-        continue;
+        // Price-based exits need a mark; time-stop must NOT — otherwise
+        // maxOpenTrades=1 wedges forever when Dex/Pump drops the mint.
+        if (isMaxHoldExceeded(pos, now, cfg.maxHoldMinutes)) {
+          mark =
+            pos.highWaterPrice > 0
+              ? pos.highWaterPrice
+              : pos.entryPrice;
+          log.warn(
+            `No live mark for ${pos.symbol}; forcing time_stop at fallback mark ${mark}`,
+          );
+        } else {
+          log.warn(`No mark for ${pos.symbol}; skipping exit check`);
+          continue;
+        }
       }
       // Skip if a concurrent manual exit already closed this position.
       if (!ledger.openPositions.some((p) => p.id === pos.id)) {
