@@ -144,7 +144,7 @@ npm run api
 | PATCH / PUT | `/config` | **PAPER_MODE only**: update paper knobs (bankroll, max position, stops, trail, TP, momentum filters, min age, max hold, daily loss, poll). Persists `data/runtime-config.json`. **409** if runner running — stop first. Rejects `paperMode` / wallet / live fields |
 | POST | `/config/preset` | Body `{ "preset": "momentum" \| "sniper" }` — apply named preset + persist. **409** if runner running |
 | GET | `/trades?limit=50` | Recent fills (session ledger; cleared by Reset) |
-| GET | `/journal?limit=&offset=` | **Trade journal** — closed paper trades newest first with **mint/CA** + **Daily/Weekly/Monthly/Overall P&L** (USD + SOL/`quoteAsset`; America/New_York periods; survives Reset) |
+| GET | `/journal?limit=&offset=` | **Trade journal** — closed paper trades newest first with **mint/CA**, optional **checklist snapshot** (id/verdict/thesis), + **Daily/Weekly/Monthly/Overall P&L** (USD + SOL/`quoteAsset`; America/New_York periods; survives Reset) |
 | PATCH | `/journal/:id` | Body `{ "note": "…" }` — edit learning note |
 | DELETE | `/journal` | Explicit journal clear only (Reset does **not** clear journal) |
 | GET | `/alerts?since=` | Session events for phone local notifications (start/stop/open/close/daily loss) |
@@ -156,7 +156,7 @@ npm run api
 | DELETE | `/checklist` | Explicit clear of all checklists |
 
 
-**Research checklist (Check tab):** Mark fills a human go/no-go form (age, liq, volume realism, holders, mint/freeze, clone name, size, thesis, invalidation) before sizing. Verdict is **GO** only when all required rows pass (optional rows may skip), thesis + invalidation are non-empty, and nothing failed. Persists in `data/checklists.json` (survives Reset). **Advisory by default** — does not block the paper bot. Optional Settings toggle **Require GO before entry** (`requireChecklistGo`, default off) makes the engine skip entries without a GO checklist for that mint.
+**Research checklist (Check tab):** Mark fills a human go/no-go form (age, liq, volume realism, holders, mint/freeze, clone name, size, thesis, invalidation) before sizing. Verdict is **GO** only when all required rows pass (optional rows may skip), thesis + invalidation are non-empty, and nothing failed. Persists in `data/checklists.json` (survives Reset). **Advisory by default** — does not block the paper bot. Optional Settings toggle **Require GO before entry** (`requireChecklistGo`, default off) makes the engine skip entries without a GO checklist for that mint. On each paper close, the journal snapshots the latest checklist for that mint (`checklistId` / verdict / thesis) so Journal rows link back to research.
 
 **Session alerts:** Android app Settings toggle (default on) polls `/alerts` and fires Capacitor Local Notifications while the app process is alive. Grant notification permission on first Start or via Settings.
 
@@ -178,7 +178,7 @@ Ledger output (under `data/`):
 
 - `trades.json` — full fill records (session; cleared by Reset)  
 - `trades.csv` — spreadsheet-friendly log  
-- `journal.json` — append-only closed-trade journal + notes + **mint/CA** (survives Reset; DexScreener links in Journal tab)  
+- `journal.json` — append-only closed-trade journal + notes + **mint/CA** + checklist snapshot at close (survives Reset; DexScreener + GO/NO-GO badge in Journal tab)  
 - `vault.json` — skimmed / vaulted USD (survives Reset; not used for sizing)  
 - Cash / positions / PnL printed each exit and at shutdown  
 

@@ -20,6 +20,11 @@ v1 is **advisory**: saving NO-GO does **not** auto-block the paper bot.
 
 Optional Settings toggle **Require GO before entry** (`requireChecklistGo`, default `false`, also `REQUIRE_CHECKLIST_GO` env / `PATCH /config`) makes the engine skip paper entries when the latest checklist for that mint is missing or not GO.
 
-## Journal
+## Journal link
 
-Light follow-up: journal does not yet store `checklistId`. Nice-to-have later.
+On each paper close, the engine snapshots the **latest checklist for that mint**
+into the journal row (`checklistId`, `checklistVerdict`, `checklistThesis`).
+
+- Snapshot-at-close only — later checklist edits do not rewrite old journal rows.
+- Missing checklist → null fields (trade still journals normally).
+- Mobile Journal shows a GO / NO-GO / INCOMPLETE badge + thesis snippet when linked.

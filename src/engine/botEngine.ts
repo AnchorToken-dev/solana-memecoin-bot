@@ -566,6 +566,8 @@ export class BotEngine {
     realizedPnlUsd: number,
   ): Promise<JournalEntry> {
     const quoteUsdRate = await this.resolveQuoteUsdRate();
+    // Snapshot latest research checklist for this mint (learning link).
+    const cl = this.checklist.latestForMint(position.mint);
     const entry = this.journal.appendClose({
       position,
       exitPrice: fill.price,
@@ -576,6 +578,9 @@ export class BotEngine {
       quoteUsdRate,
       quoteAsset: DEFAULT_QUOTE_ASSET,
       chainId: DEFAULT_CHAIN_ID,
+      checklistId: cl?.id ?? null,
+      checklistVerdict: cl?.verdict ?? null,
+      checklistThesis: cl?.thesis ?? null,
     });
     const reason = fill.reason ?? "unknown";
     const pnlSign = realizedPnlUsd >= 0 ? "+" : "";

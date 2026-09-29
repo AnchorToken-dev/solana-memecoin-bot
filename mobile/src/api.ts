@@ -188,6 +188,9 @@ export const api = {
         pnlQuote?: number | null;
         quoteUsdRate?: number | null;
         quoteBasis?: string;
+        checklistId?: string | null;
+        checklistVerdict?: "GO" | "NO-GO" | "INCOMPLETE" | null;
+        checklistThesis?: string | null;
       }>;
       total: number;
       limit: number;

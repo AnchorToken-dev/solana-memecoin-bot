@@ -43,6 +43,18 @@ function fmtTs(n: unknown): string {
   return new Date(n).toLocaleString();
 }
 
+/** Humanize ms age (cycleAgeMs / remainingMs). */
+function fmtDuration(ms: unknown): string {
+  const n = typeof ms === "number" ? ms : Number(ms);
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n < 1000) return `${Math.round(n)}ms`;
+  const s = n / 1000;
+  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)}s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s % 60);
+  return `${m}m ${rem}s`;
+}
+
 async function withBusy(fn: () => Promise<void>) {
   busy = true;
   error = "";
@@ -156,6 +168,13 @@ async function paintStatus(main: Element) {
     | { activatePct?: number; distancePct?: number }
     | undefined;
   const lock = readChaseLockout(status);
+  const cycleAgeMs =
+    typeof status.cycleAgeMs === "number" && Number.isFinite(status.cycleAgeMs)
+      ? status.cycleAgeMs
+      : null;
+  const runningNow = status.state === "running";
+  // Poll + market timeout budget; far beyond that ⇒ tick likely wedged.
+  const stall = runningNow && cycleAgeMs != null && cycleAgeMs > 45_000;
   main.innerHTML = `
     ${chaseLockoutBanner(lock)}
     <div class="card">
@@ -173,7 +192,15 @@ async function paintStatus(main: Element) {
       }</span></div>
       <div class="row"><span class="k">Started</span><span class="v">${fmtTs(status.startedAt)}</span></div>
       <div class="row"><span class="k">Last cycle</span><span class="v">${fmtTs(status.lastCycleAt)}</span></div>
+      <div class="row"><span class="k">Cycle age</span><span class="v ${stall ? "warn-text" : ""}">${
+        cycleAgeMs == null ? "—" : fmtDuration(cycleAgeMs)
+      }</span></div>
       <div class="row"><span class="k">Last error</span><span class="v">${escapeHtml(String(status.lastError ?? "—"))}</span></div>
+      ${
+        stall
+          ? `<p class="stall-warn">Tick looks stalled (cycle age ${fmtDuration(cycleAgeMs)}). Prefer Stop then Start if exits are not firing — hung market HTTP should self-recover within ~8s after recent fixes.</p>`
+          : ""
+      }
       <div class="actions">
         <button class="secondary" id="refresh" ${busy?"disabled":""}>Refresh</button>
       </div>
@@ -620,7 +647,7 @@ async function paintJournal(main: Element) {
     ${summaryCard}
     <div class="card">
       <h2>Trade journal</h2>
-      <p class="muted">Closed paper trades with notes + mint/CA. Survives session <strong>Reset</strong> — clear only via button below. Same-named coins are distinguished by CA; open DexScreener from each row. PnL shown in USD + ${escapeHtml(quoteAsset)}.</p>
+      <p class="muted">Closed paper trades with notes + mint/CA. Survives session <strong>Reset</strong> — clear only via button below. Same-named coins are distinguished by CA; open DexScreener from each row. When a research checklist existed for the mint at close, a GO / NO-GO badge links the trade to that research. PnL shown in USD + ${escapeHtml(quoteAsset)}.</p>
       <div class="row"><span class="k">Entries</span><span class="v">${escapeHtml(String(data.total))}</span></div>
       ${
         entries.length === 0
@@ -653,6 +680,26 @@ async function paintJournal(main: Element) {
                 e.quoteBasis && e.quoteBasis !== "recorded"
                   ? ` · <span class="muted">${escapeHtml(e.quoteBasis)}</span>`
                   : "";
+              const clVerdict = e.checklistVerdict;
+              const clBadgeClass =
+                clVerdict === "GO"
+                  ? "go"
+                  : clVerdict === "NO-GO"
+                    ? "nogo"
+                    : clVerdict === "INCOMPLETE"
+                      ? "incomplete"
+                      : "";
+              const checklistBlock =
+                clVerdict && e.checklistId
+                  ? `<div class="journal-checklist">
+                      <span class="cl-badge ${clBadgeClass}">${escapeHtml(clVerdict)}</span>
+                      ${
+                        e.checklistThesis
+                          ? `<span class="muted">${escapeHtml(e.checklistThesis.slice(0, 80))}</span>`
+                          : `<span class="muted">checklist linked</span>`
+                      }
+                    </div>`
+                  : `<div class="journal-checklist muted">No checklist at close</div>`;
               return `<div class="journal-row" data-jid="${escapeAttr(e.id)}">
                 <div class="journal-top">
                   <strong>${escapeHtml(e.symbol || mintShort || "—")}</strong>
@@ -662,6 +709,7 @@ async function paintJournal(main: Element) {
                 · size ${sizeDual}${basisHint}
                 · ${escapeHtml(String(e.entryPrice))} → ${escapeHtml(String(e.exitPrice))}</div>
                 ${mintBlock}
+                ${checklistBlock}
                 <button type="button" class="journal-note-btn" data-jid="${escapeAttr(e.id)}" data-note="${escapeAttr(e.note ?? "")}">${notePreview}</button>
               </div>`;
             }).join("")
@@ -763,7 +811,7 @@ async function paintSettings(main: Element, base: string) {
         <button class="primary" id="saveCfg" ${busy||running?"disabled":""}>Save</button>
         <button class="secondary" id="refreshCfg">Refresh</button>
       </div>
-      <p class="muted" style="margin-top:10px">Saved to server <code>data/runtime-config.json</code> (survives restart). Live / wallet fields are rejected by the API.</p>
+      <p class="muted" style="margin-top:10px">Saved to server <code>data/runtime-config.json</code> (survives restart). Changing bankroll / max position / daily loss asks for confirm (sticky risk friction). Live / wallet fields are rejected by the API.</p>
     </div>
     <div class="card">
       <h2>Research checklist gate</h2>
@@ -823,14 +871,34 @@ async function paintSettings(main: Element, base: string) {
   main.querySelector("#refreshCfg")?.addEventListener("click", () => void render());
   main.querySelector("#saveCfg")?.addEventListener("click", () => {
     const n = (id: string) => Number((main.querySelector(`#${id}`) as HTMLInputElement).value);
+    const nextBankroll = n("fBankroll");
+    const nextMaxPos = n("fMaxPos");
+    const nextDaily = n("fDaily");
+    const prevBankroll = Number(cfg.bankrollUsd);
+    const prevMaxPos = Number(cfg.maxPositionUsd);
+    const prevDaily = Number(cfg.dailyLossUsd);
+    const riskChanged =
+      (Number.isFinite(nextBankroll) && nextBankroll !== prevBankroll) ||
+      (Number.isFinite(nextMaxPos) && nextMaxPos !== prevMaxPos) ||
+      (Number.isFinite(nextDaily) && nextDaily !== prevDaily);
+    if (riskChanged) {
+      const ok = window.confirm(
+        `Change sticky session risk?\n\n` +
+          `Bankroll: $${Number.isFinite(prevBankroll) ? prevBankroll.toFixed(2) : "?"} → $${Number.isFinite(nextBankroll) ? nextBankroll.toFixed(2) : "?"}\n` +
+          `Max position: $${Number.isFinite(prevMaxPos) ? prevMaxPos.toFixed(2) : "?"} → $${Number.isFinite(nextMaxPos) ? nextMaxPos.toFixed(2) : "?"}\n` +
+          `Daily loss: $${Number.isFinite(prevDaily) ? prevDaily.toFixed(2) : "?"} → $${Number.isFinite(nextDaily) ? nextDaily.toFixed(2) : "?"}\n\n` +
+          `Presets do not overwrite these. Cancel if this was accidental.`,
+      );
+      if (!ok) return;
+    }
     void withBusy(async () => {
       const r = await api.patchConfig({
-        bankrollUsd: n("fBankroll"),
-        maxPositionUsd: n("fMaxPos"),
+        bankrollUsd: nextBankroll,
+        maxPositionUsd: nextMaxPos,
         stopLossPct: n("fStop"),
         takeProfitPct: n("fTp"),
         maxHoldMinutes: n("fHold"),
-        dailyLossUsd: n("fDaily"),
+        dailyLossUsd: nextDaily,
         chaseLockoutHours: n("fChase"),
         trailingTakeProfit: {
           activatePct: n("fTrailAct"),

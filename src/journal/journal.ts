@@ -54,6 +54,14 @@ export interface JournalEntry {
   positionId: string;
   fillId: string;
   /**
+   * Latest research checklist for this mint at close time (if any).
+   * Snapshot only — checklist edits later do not rewrite journal rows.
+   */
+  checklistId: string | null;
+  checklistVerdict: "GO" | "NO-GO" | "INCOMPLETE" | null;
+  /** Thesis snippet from that checklist (truncated). */
+  checklistThesis: string | null;
+  /**
    * Chain quote asset ticker for native sizing display (SOL now;
    * later RHUSD / etc. — do not hard-wire UI to "SOL" forever).
    */
@@ -222,6 +230,20 @@ function normalizeEntry(raw: unknown): JournalEntry | null {
     pnlQuote,
     quoteUsdRate,
     quoteBasis,
+    checklistId:
+      typeof e.checklistId === "string" && e.checklistId.trim()
+        ? e.checklistId.trim()
+        : null,
+    checklistVerdict:
+      e.checklistVerdict === "GO" ||
+      e.checklistVerdict === "NO-GO" ||
+      e.checklistVerdict === "INCOMPLETE"
+        ? e.checklistVerdict
+        : null,
+    checklistThesis:
+      typeof e.checklistThesis === "string" && e.checklistThesis.trim()
+        ? e.checklistThesis.trim().slice(0, 200)
+        : null,
   };
 }
 
@@ -476,6 +498,10 @@ export class TradeJournal {
     quoteUsdRate?: number | null;
     quoteAsset?: string;
     chainId?: string;
+    /** Snapshot of latest checklist for mint at close (optional). */
+    checklistId?: string | null;
+    checklistVerdict?: "GO" | "NO-GO" | "INCOMPLETE" | null;
+    checklistThesis?: string | null;
   }): JournalEntry {
     const sizeUsd = args.position.entryNotionalUsd;
     const pnlPct = sizeUsd > 0 ? (args.pnlUsd / sizeUsd) * 100 : 0;
@@ -506,6 +532,20 @@ export class TradeJournal {
       pnlQuote: derived.pnlQuote,
       quoteUsdRate: derived.quoteUsdRate,
       quoteBasis: derived.quoteBasis,
+      checklistId:
+        typeof args.checklistId === "string" && args.checklistId.trim()
+          ? args.checklistId.trim()
+          : null,
+      checklistVerdict:
+        args.checklistVerdict === "GO" ||
+        args.checklistVerdict === "NO-GO" ||
+        args.checklistVerdict === "INCOMPLETE"
+          ? args.checklistVerdict
+          : null,
+      checklistThesis:
+        typeof args.checklistThesis === "string" && args.checklistThesis.trim()
+          ? args.checklistThesis.trim().slice(0, 200)
+          : null,
     };
     this.entries.push(entry);
     this.persist();
@@ -518,6 +558,8 @@ export class TradeJournal {
       quoteAsset: entry.quoteAsset,
       quoteBasis: entry.quoteBasis,
       reason: entry.exitReason,
+      checklistId: entry.checklistId,
+      checklistVerdict: entry.checklistVerdict,
     });
     return entry;
   }
