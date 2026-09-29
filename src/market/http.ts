@@ -11,6 +11,19 @@ export type FetchLike = (
 /** Default per-request timeout for market data HTTP (ms). */
 export const DEFAULT_MARKET_HTTP_TIMEOUT_MS = 8_000;
 
+/**
+ * When getPrice already has a cache mark, wait at most this long for a Dex
+ * refresh before falling back. Exit checks must not sit on the full
+ * MARKET_HTTP_TIMEOUT_MS (default 8s) every tick.
+ */
+export const CACHED_PRICE_REFRESH_TIMEOUT_MS = 2_000;
+
+/**
+ * While a position is open, poll at most this often (ms), even if the preset
+ * pollIntervalMs is slower. Caps sniper 10s / momentum 15s idle feel on exits.
+ */
+export const IN_POSITION_POLL_INTERVAL_MS = 3_000;
+
 /** Resolve timeout from env MARKET_HTTP_TIMEOUT_MS (clamped). */
 export function marketHttpTimeoutMs(
   fallback = DEFAULT_MARKET_HTTP_TIMEOUT_MS,

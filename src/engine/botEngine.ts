@@ -2,9 +2,10 @@
  * Controllable paper bot engine — start/stop from CLI or HTTP control API.
  * Live trading remains stubbed; start() refuses unless PAPER_MODE=true.
  */
-import type { BotConfig, Fill, PortfolioSnapshot, Position, TokenSnapshot, TradeRecord } from "../types.js";
+import type { BotConfig, Fill, PortfolioSnapshot, Position, TradeRecord } from "../types.js";
 import type { MarketDataProvider } from "../market/data.js";
 import { createMarketData } from "../market/data.js";
+import { IN_POSITION_POLL_INTERVAL_MS } from "../market/http.js";
 import { PaperBroker } from "../broker/paper.js";
 import { PaperLedger } from "../ledger/ledger.js";
 import { evaluateEntries, evaluateExit } from "../strategy/momentum.js";
@@ -950,7 +951,13 @@ export class BotEngine {
       }
 
       try {
-        await sleep(cfg.runner.pollIntervalMs, signal);
+        // Faster cadence while in a position so stop/trail don't wait a full
+        // sniper 10s / momentum 15s between mark checks.
+        const sleepMs =
+          ledger.openPositions.length > 0
+            ? Math.min(cfg.runner.pollIntervalMs, IN_POSITION_POLL_INTERVAL_MS)
+            : cfg.runner.pollIntervalMs;
+        await sleep(sleepMs, signal);
       } catch (err) {
         if ((err as { name?: string }).name === "AbortError") break;
         throw err;
@@ -1012,10 +1019,12 @@ export class BotEngine {
   private async tick(cycle: number): Promise<boolean> {
     const { cfg, market, broker, ledger } = this;
     const now = Date.now();
-    const snaps = await market.scan(cfg.runner.scanLimit);
 
-    for (const pos of ledger.openPositions) {
-      let mark = await markFor(pos.mint, snaps, market);
+    // Exits FIRST — do not wait on a full candidate scan (Pump + sequential/parallel
+    // Dex enrich) before stop / trail / TP / time_stop. With maxOpen=1 that scan
+    // is wasted work on every in-position tick and added seconds of latency.
+    for (const pos of [...ledger.openPositions]) {
+      let mark = await market.getPrice(pos.mint);
       if (mark == null) {
         // Price-based exits need a mark; time-stop must NOT — otherwise
         // maxOpenTrades=1 wedges forever when Dex/Pump drops the mint.
@@ -1068,9 +1077,11 @@ export class BotEngine {
     }
 
     if (!canOpenAnother(ledger.openPositions.length, cfg)) {
-      log.debug(`Cycle ${cycle}: at max open trades`);
+      log.debug(`Cycle ${cycle}: at max open trades (skipped entry scan)`);
       return false;
     }
+
+    const snaps = await market.scan(cfg.runner.scanLimit);
 
     const openMints = new Set(ledger.openPositions.map((p) => p.mint));
     const { signals: entries, rejects } = evaluateEntries(
@@ -1141,12 +1152,3 @@ export class BotEngine {
   }
 }
 
-async function markFor(
-  mint: string,
-  snaps: TokenSnapshot[],
-  market: MarketDataProvider,
-): Promise<number | null> {
-  const fromScan = snaps.find((s) => s.mint === mint);
-  if (fromScan) return fromScan.priceUsd;
-  return market.getPrice(mint);
-}

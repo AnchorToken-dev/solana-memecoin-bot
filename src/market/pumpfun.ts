@@ -21,6 +21,7 @@
 import type { TokenSnapshot } from "../types.js";
 import { log } from "../logging.js";
 import {
+  CACHED_PRICE_REFRESH_TIMEOUT_MS,
   fetchWithTimeout,
   isAbortError,
   marketHttpTimeoutMs,
@@ -160,11 +161,12 @@ export class PumpFunMarketData {
   private async http(
     input: string,
     init?: RequestInit,
+    timeoutMs?: number,
   ): Promise<Response> {
     return fetchWithTimeout(
       input,
       init,
-      this.httpTimeoutMs,
+      timeoutMs ?? this.httpTimeoutMs,
       this.fetchImpl,
     );
   }
@@ -199,12 +201,17 @@ export class PumpFunMarketData {
   }
 
   async getPrice(mint: string): Promise<number | null> {
-    // Cache-first: never block exit checks forever on a hung Dex refresh.
-    // A timed-out / failed enrich falls back to the last known paper mark.
+    // Cache-first for latency: if we already have a mark, only wait a short
+    // refresh window (CACHED_PRICE_REFRESH_TIMEOUT_MS) before using cache.
+    // Without a cache, use the full HTTP timeout (cold path).
     const cached = this.priceCache.get(mint);
     if (this.dexEnrich) {
+      const refreshMs =
+        cached != null
+          ? Math.min(this.httpTimeoutMs, CACHED_PRICE_REFRESH_TIMEOUT_MS)
+          : this.httpTimeoutMs;
       try {
-        const enriched = await this.fetchDexPairForMint(mint);
+        const enriched = await this.fetchDexPairForMint(mint, refreshMs);
         if (enriched?.priceUsd) {
           this.priceCache.set(mint, enriched.priceUsd);
           this.recordPrice(mint, enriched.priceUsd);
@@ -371,43 +378,48 @@ export class PumpFunMarketData {
   private async enrichWithDexScreener(
     snaps: TokenSnapshot[],
   ): Promise<TokenSnapshot[]> {
-    const out: TokenSnapshot[] = [];
-    for (const s of snaps) {
-      try {
-        const pair = await this.fetchDexPairForMint(s.mint);
-        if (pair) {
-          out.push({
-            ...s,
-            priceUsd: pair.priceUsd > 0 ? pair.priceUsd : s.priceUsd,
-            changeWindowPct:
-              pair.changeWindowPct !== null
-                ? pair.changeWindowPct
-                : s.changeWindowPct,
-            volumeWindowUsd: pair.volumeWindowUsd || s.volumeWindowUsd,
-            volumeAvgUsd: pair.volumeAvgUsd || s.volumeAvgUsd,
-            volume24hUsd: pair.volume24hUsd || s.volume24hUsd,
-            liquidityUsd:
-              pair.liquidityUsd > 0 ? pair.liquidityUsd : s.liquidityUsd,
-          });
-          if (pair.priceUsd > 0) {
-            this.priceCache.set(s.mint, pair.priceUsd);
-            this.recordPrice(s.mint, pair.priceUsd);
+    // Parallel enrich — sequential awaits stacked full HTTP timeouts and
+    // blocked entry scans (and previously, exit checks) for many seconds.
+    return Promise.all(
+      snaps.map(async (s, i) => {
+        if (this.enrichDelayMs > 0 && i > 0) {
+          await sleep(this.enrichDelayMs * i);
+        }
+        try {
+          const pair = await this.fetchDexPairForMint(s.mint);
+          if (pair) {
+            if (pair.priceUsd > 0) {
+              this.priceCache.set(s.mint, pair.priceUsd);
+              this.recordPrice(s.mint, pair.priceUsd);
+            }
+            return {
+              ...s,
+              priceUsd: pair.priceUsd > 0 ? pair.priceUsd : s.priceUsd,
+              changeWindowPct:
+                pair.changeWindowPct !== null
+                  ? pair.changeWindowPct
+                  : s.changeWindowPct,
+              volumeWindowUsd: pair.volumeWindowUsd || s.volumeWindowUsd,
+              volumeAvgUsd: pair.volumeAvgUsd || s.volumeAvgUsd,
+              volume24hUsd: pair.volume24hUsd || s.volume24hUsd,
+              liquidityUsd:
+                pair.liquidityUsd > 0 ? pair.liquidityUsd : s.liquidityUsd,
+            };
           }
-        } else {
-          out.push(s);
+        } catch (err) {
+          if (isAbortError(err)) {
+            log.warn(`Dex enrich timed out for ${s.symbol}; keeping pump fields`);
+          }
         }
-      } catch (err) {
-        if (isAbortError(err)) {
-          log.warn(`Dex enrich timed out for ${s.symbol}; keeping pump fields`);
-        }
-        out.push(s);
-      }
-      if (this.enrichDelayMs > 0) await sleep(this.enrichDelayMs);
-    }
-    return out;
+        return s;
+      }),
+    );
   }
 
-  private async fetchDexPairForMint(mint: string): Promise<{
+  private async fetchDexPairForMint(
+    mint: string,
+    timeoutMs?: number,
+  ): Promise<{
     priceUsd: number;
     changeWindowPct: number | null;
     volumeWindowUsd: number;
@@ -418,6 +430,7 @@ export class PumpFunMarketData {
     const res = await this.http(
       `https://api.dexscreener.com/latest/dex/tokens/${mint}`,
       { headers: { accept: "application/json" } },
+      timeoutMs,
     );
     if (!res.ok) return null;
     const body = (await res.json()) as {
