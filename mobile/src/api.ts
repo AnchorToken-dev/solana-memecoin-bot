@@ -156,6 +156,22 @@ export const api = {
       config: Record<string, unknown>;
       status: Record<string, unknown>;
     }>("/config", { method: "PATCH", body: JSON.stringify(body) }),
+  setTarget: (mint: string) =>
+    request<{
+      ok: boolean;
+      message: string;
+      mint: string | null;
+      mode: "pinned" | "hunt";
+      status: Record<string, unknown>;
+    }>("/target", { method: "POST", body: JSON.stringify({ mint }) }),
+  clearTarget: () =>
+    request<{
+      ok: boolean;
+      message: string;
+      mint: string | null;
+      mode: "pinned" | "hunt";
+      status: Record<string, unknown>;
+    }>("/target", { method: "DELETE" }),
   applyPreset: (preset: "momentum" | "sniper") =>
     request<{
       ok: boolean;
