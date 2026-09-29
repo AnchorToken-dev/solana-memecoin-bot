@@ -39,3 +39,16 @@ the control API “fixes” it. Often after a few hours of uptime.
 While running, if `cycleAgeMs` grows far beyond `pollIntervalMs + scan budget`,
 the tick is stalled — prefer stop/restart after this fix; hung HTTP should
 self-recover within one timeout window.
+
+## Exit latency follow-up
+
+PR #16 bounded hung HTTP (good) but exit checks still waited on a full
+candidate `scan()` (Pump + Dex enrich) before `evaluateExit`, and `getPrice`
+awaited up to the full `MARKET_HTTP_TIMEOUT_MS` even with a usable cache.
+
+Later fix (`fix/faster-exits-while-in-position`):
+
+- Evaluate open-position exits **before** any entry scan; skip scan at maxOpen
+- Cached `getPrice` refresh capped at 2s
+- In-position poll capped at 3s
+- Parallel Dex enrich for entry scans

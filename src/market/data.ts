@@ -2,6 +2,7 @@ import type { BotConfig, TokenSnapshot } from "../types.js";
 import { log } from "../logging.js";
 import { PumpFunMarketData } from "./pumpfun.js";
 import {
+  CACHED_PRICE_REFRESH_TIMEOUT_MS,
   fetchWithTimeout,
   isAbortError,
   marketHttpTimeoutMs,
@@ -132,8 +133,12 @@ export class DexScreenerMarketData implements MarketDataProvider {
     this.httpTimeoutMs = opts?.httpTimeoutMs ?? marketHttpTimeoutMs();
   }
 
-  private async http(input: string, init?: RequestInit): Promise<Response> {
-    return fetchWithTimeout(input, init, this.httpTimeoutMs);
+  private async http(
+    input: string,
+    init?: RequestInit,
+    timeoutMs?: number,
+  ): Promise<Response> {
+    return fetchWithTimeout(input, init, timeoutMs ?? this.httpTimeoutMs);
   }
 
   async scan(limit: number): Promise<TokenSnapshot[]> {
@@ -168,11 +173,15 @@ export class DexScreenerMarketData implements MarketDataProvider {
     }
   }
 
-  private async fetchPair(mint: string): Promise<TokenSnapshot | null> {
+  private async fetchPair(
+    mint: string,
+    timeoutMs?: number,
+  ): Promise<TokenSnapshot | null> {
     try {
       const res = await this.http(
         `https://api.dexscreener.com/latest/dex/tokens/${mint}`,
         { headers: { accept: "application/json" } },
+        timeoutMs,
       );
       if (!res.ok) return null;
       const body = (await res.json()) as {
@@ -213,8 +222,12 @@ export class DexScreenerMarketData implements MarketDataProvider {
 
   async getPrice(mint: string): Promise<number | null> {
     const cached = this.cache.get(mint);
+    const refreshMs =
+      cached != null
+        ? Math.min(this.httpTimeoutMs, CACHED_PRICE_REFRESH_TIMEOUT_MS)
+        : this.httpTimeoutMs;
     try {
-      const snap = await this.fetchPair(mint);
+      const snap = await this.fetchPair(mint, refreshMs);
       if (snap) return snap.priceUsd;
     } catch (err) {
       if (isAbortError(err)) {
