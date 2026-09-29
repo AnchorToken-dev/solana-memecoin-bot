@@ -67,6 +67,45 @@ function mockMarket(priceByMint: Map<string, number>): MarketDataProvider {
 }
 
 describe("TradeJournal unit", () => {
+  it("stores checklist snapshot fields on appendClose", () => {
+    const dir = mkdtempSync(join(tmpdir(), "journal-cl-fields-"));
+    try {
+      const j = new TradeJournal(dir);
+      const entry = j.appendClose({
+        position: {
+          id: "posCl",
+          mint: "MintCl",
+          symbol: "CL",
+          side: "long",
+          qty: 5,
+          entryPrice: 1,
+          entryNotionalUsd: 5,
+          entryFeesUsd: 0,
+          highWaterPrice: 1,
+          trailArmed: false,
+          openedAt: 1_000,
+        },
+        exitPrice: 1.1,
+        pnlUsd: 0.5,
+        exitReason: "manual_exit",
+        fillId: "fillCl",
+        timestamp: 2_000,
+        checklistId: "cl-uuid-1",
+        checklistVerdict: "GO",
+        checklistThesis: "strength hold",
+      });
+      assert.equal(entry.checklistId, "cl-uuid-1");
+      assert.equal(entry.checklistVerdict, "GO");
+      assert.equal(entry.checklistThesis, "strength hold");
+      const again = new TradeJournal(dir);
+      const listed = again.list({ limit: 5 });
+      assert.equal(listed.entries[0]!.checklistId, "cl-uuid-1");
+      assert.equal(listed.entries[0]!.checklistVerdict, "GO");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("appends close, updates note, persists to disk", () => {
     const dir = mkdtempSync(join(tmpdir(), "journal-unit-"));
     try {
@@ -96,6 +135,8 @@ describe("TradeJournal unit", () => {
       assert.equal(entry.note, "");
       assert.equal(entry.quoteAsset, "SOL");
       assert.equal(entry.quoteBasis, "usd_only");
+      assert.equal(entry.checklistId, null);
+      assert.equal(entry.checklistVerdict, null);
       assert.equal(existsSync(join(dir, "journal.json")), true);
 
       const upd = j.updateNote(entry.id, "caught the pump");

@@ -366,3 +366,98 @@ describe("requireChecklistGo gate", () => {
     }
   });
 });
+
+describe("journal ↔ checklist link", () => {
+  it("snapshots latest checklist onto journal close", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "journal-checklist-"));
+    try {
+      const mint = "MintLink1";
+      const prices = new Map([[mint, 1.0]]);
+      const cfg = baseCfg({
+        ledgerDir: dir,
+        runner: { pollIntervalMs: 20, scanLimit: 5, maxCycles: 0 },
+      });
+      const checklist = new ResearchChecklistStore(dir);
+      const created = checklist.create({
+        mint,
+        symbol: "LNK",
+        items: allPass(defaultItemStates()),
+        thesis: "continuation after reclaim",
+        invalidation: "loss of local high",
+      });
+      assert.equal(created.ok, true);
+      if (!created.ok) return;
+
+      const journal = new TradeJournal(dir);
+      const engine = new BotEngine(cfg, {
+        ledger: new PaperLedger(cfg.bankrollUsd, dir),
+        broker: new PaperBroker(cfg),
+        journal,
+        checklist,
+        market: mockMarket(prices),
+      });
+
+      // Seed an open position via broker/ledger, then manual exit.
+      const { fill, position } = engine.broker.applyBuy({
+        mint,
+        symbol: "LNK",
+        markPrice: 1.0,
+        notionalUsd: 20,
+      });
+      engine.ledger.recordBuy(fill, position);
+
+      prices.set(mint, 1.1);
+      const exited = await engine.exitNow();
+      assert.equal(exited.ok, true);
+
+      const listed = await engine.getJournal({ limit: 10 });
+      assert.equal(listed.total, 1);
+      const row = listed.entries[0]!;
+      assert.equal(row.mint, mint);
+      assert.equal(row.checklistId, created.entry.id);
+      assert.equal(row.checklistVerdict, "GO");
+      assert.match(row.checklistThesis ?? "", /continuation/);
+
+      // Disk round-trip keeps checklist snapshot.
+      const disk = JSON.parse(
+        readFileSync(join(dir, "journal.json"), "utf8"),
+      ) as Array<{ checklistId?: string; checklistVerdict?: string }>;
+      assert.equal(disk[0]!.checklistId, created.entry.id);
+      assert.equal(disk[0]!.checklistVerdict, "GO");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("journals null checklist fields when no research row exists", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "journal-nocheck-"));
+    try {
+      const mint = "MintNoCl";
+      const prices = new Map([[mint, 1.0]]);
+      const cfg = baseCfg({ ledgerDir: dir });
+      const engine = new BotEngine(cfg, {
+        ledger: new PaperLedger(cfg.bankrollUsd, dir),
+        broker: new PaperBroker(cfg),
+        journal: new TradeJournal(dir),
+        checklist: new ResearchChecklistStore(dir),
+        market: mockMarket(prices),
+      });
+      const { fill, position } = engine.broker.applyBuy({
+        mint,
+        symbol: "NOC",
+        markPrice: 1.0,
+        notionalUsd: 10,
+      });
+      engine.ledger.recordBuy(fill, position);
+      const exited = await engine.exitNow();
+      assert.equal(exited.ok, true);
+      const listed = await engine.getJournal({ limit: 5 });
+      const row = listed.entries[0]!;
+      assert.equal(row.checklistId, null);
+      assert.equal(row.checklistVerdict, null);
+      assert.equal(row.checklistThesis, null);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

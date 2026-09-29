@@ -8,6 +8,8 @@ data/trades.json
 data/runtime-config.json
 data/journal.json
 data/checklists.json
+data/chase-lockout.json
+data/vault.json
 *.log
 .DS_Store
 coverage/

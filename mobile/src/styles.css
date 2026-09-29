@@ -346,3 +346,46 @@ textarea {
   color: var(--warn);
   border-color: #fbbf24;
 }
+
+.journal-checklist {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin-top: 6px;
+  font-size: 0.8rem;
+}
+.cl-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+.cl-badge.go {
+  background: #064e3b;
+  color: var(--accent);
+  border-color: #10b981;
+}
+.cl-badge.nogo {
+  background: #4c0519;
+  color: var(--danger);
+  border-color: #fb7185;
+}
+.cl-badge.incomplete {
+  background: #1e293b;
+  color: var(--warn);
+  border-color: #fbbf24;
+}
+.stall-warn {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #fbbf24;
+  background: #422006;
+  color: var(--warn);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
