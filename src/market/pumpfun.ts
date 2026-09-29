@@ -230,6 +230,67 @@ export class PumpFunMarketData {
     return cached ?? null;
   }
 
+  /**
+   * One coin for the pin. Tries the Pump.fun coin endpoint, then DexScreener.
+   * Never falls back to the board scan.
+   */
+  async lookup(mint: string): Promise<TokenSnapshot | null> {
+    const fromPump = await this.lookupPumpCoin(mint);
+    if (fromPump) {
+      if (this.dexEnrich) {
+        try {
+          const [enriched] = await this.enrichWithDexScreener([fromPump]);
+          return enriched ?? fromPump;
+        } catch (err) {
+          log.warn(`Pinned mint Dex enrich failed for ${mint.slice(0, 8)}…`, err);
+          return fromPump;
+        }
+      }
+      return fromPump;
+    }
+    if (!this.dexFallback && !this.dexEnrich) return null;
+    try {
+      const pair = await this.fetchDexPairForMint(mint);
+      if (!pair || !(pair.priceUsd > 0)) return null;
+      if (pair.baseMint && pair.baseMint !== mint) return null;
+      this.priceCache.set(mint, pair.priceUsd);
+      this.recordPrice(mint, pair.priceUsd);
+      return {
+        mint,
+        symbol: pair.symbol || mint.slice(0, 4),
+        name: pair.name || pair.symbol || mint.slice(0, 8),
+        priceUsd: pair.priceUsd,
+        changeWindowPct: pair.changeWindowPct ?? this.changeFromHistory(mint, pair.priceUsd),
+        volumeWindowUsd: pair.volumeWindowUsd,
+        volumeAvgUsd: pair.volumeAvgUsd,
+        volume24hUsd: pair.volume24hUsd,
+        liquidityUsd: pair.liquidityUsd,
+        timestamp: Date.now(),
+        ...(pair.createdAt != null ? { createdAt: pair.createdAt } : {}),
+      };
+    } catch (err) {
+      log.warn(`Pinned mint Dex lookup failed for ${mint.slice(0, 8)}…`, err);
+      return null;
+    }
+  }
+
+  private async lookupPumpCoin(mint: string): Promise<TokenSnapshot | null> {
+    try {
+      const res = await this.http(
+        `${this.apiBase}/coins/${encodeURIComponent(mint)}`,
+        { headers: BROWSERISH_HEADERS },
+      );
+      if (!res.ok) return null;
+      const coin = (await res.json()) as PumpCoin;
+      if (!coin?.mint || coin.mint !== mint || coin.is_banned) return null;
+      const solUsd = await this.fetchSolPriceUsd();
+      return this.coinToSnapshot(coin, solUsd);
+    } catch (err) {
+      log.warn(`Pump.fun coin lookup failed for ${mint.slice(0, 8)}…`, err);
+      return null;
+    }
+  }
+
   /** Exposed for tests / dry-run. */
   async fetchPumpCandidates(limit: number): Promise<PumpCoin[]> {
     // Mix "hot" (last trade) + "new" so paper scan resembles the pump.fun board.
@@ -426,6 +487,10 @@ export class PumpFunMarketData {
     volumeAvgUsd: number;
     volume24hUsd: number;
     liquidityUsd: number;
+    baseMint?: string;
+    symbol?: string;
+    name?: string;
+    createdAt?: number;
   } | null> {
     const res = await this.http(
       `https://api.dexscreener.com/latest/dex/tokens/${mint}`,
@@ -437,10 +502,12 @@ export class PumpFunMarketData {
       pairs?: Array<{
         chainId?: string;
         dexId?: string;
+        baseToken?: { address?: string; symbol?: string; name?: string };
         priceUsd?: string;
         liquidity?: { usd?: number };
         volume?: { h24?: number; m5?: number };
         priceChange?: { m5?: number; h1?: number };
+        pairCreatedAt?: number;
       }>;
     };
     const pairs = (body.pairs ?? []).filter((p) => p.chainId === "solana");
@@ -454,6 +521,7 @@ export class PumpFunMarketData {
     const price = Number(preferred.priceUsd);
     const vol5 = preferred.volume?.m5 ?? 0;
     const vol24 = preferred.volume?.h24 ?? 0;
+    const createdAt = normalizeCreatedAtMs(preferred.pairCreatedAt);
     return {
       priceUsd: price,
       changeWindowPct:
@@ -464,6 +532,14 @@ export class PumpFunMarketData {
       volumeAvgUsd: Math.max(vol24 / 288, 1),
       volume24hUsd: vol24,
       liquidityUsd: preferred.liquidity?.usd ?? 0,
+      ...(preferred.baseToken?.address
+        ? { baseMint: preferred.baseToken.address }
+        : {}),
+      ...(preferred.baseToken?.symbol
+        ? { symbol: preferred.baseToken.symbol }
+        : {}),
+      ...(preferred.baseToken?.name ? { name: preferred.baseToken.name } : {}),
+      ...(createdAt != null ? { createdAt } : {}),
     };
   }
 

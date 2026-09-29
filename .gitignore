@@ -9,6 +9,7 @@ data/runtime-config.json
 data/journal.json
 data/checklists.json
 data/chase-lockout.json
+data/pinned-mint.json
 data/vault.json
 *.log
 .DS_Store

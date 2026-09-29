@@ -389,3 +389,62 @@ textarea {
   font-size: 0.85rem;
   font-weight: 600;
 }
+
+/* Single-coin pin — large type (read without glasses). */
+.pin-card h2 { font-size: 1.45rem; }
+.pin-lead {
+  color: var(--text);
+  font-size: 1.12rem;
+  line-height: 1.4;
+  margin: 8px 0 12px;
+}
+.pinned-label {
+  font-size: 1.2rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  margin-top: 6px;
+}
+.pinned-symbol {
+  font-size: 1.85rem;
+  font-weight: 800;
+  line-height: 1.2;
+  margin-top: 4px;
+}
+.pinned-mint {
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1.35;
+  word-break: break-all;
+  margin: 6px 0 12px;
+}
+.pin-label {
+  color: var(--text);
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin: 8px 0 8px;
+}
+input.pin-input {
+  font-size: 1.35rem;
+  line-height: 1.35;
+  padding: 16px 14px;
+  font-weight: 650;
+}
+button.pin-action {
+  font-size: 1.15rem;
+  padding: 16px 18px;
+}
+.pin-error {
+  color: var(--danger);
+  font-size: 1.2rem;
+  font-weight: 700;
+  line-height: 1.35;
+  margin: 8px 0;
+}
+.pin-ok {
+  color: var(--accent);
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1.35;
+  margin: 8px 0;
+}
+.pin-status { margin: 10px 0 4px; }

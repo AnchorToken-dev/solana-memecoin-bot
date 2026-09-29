@@ -11,6 +11,11 @@ import {
 export interface MarketDataProvider {
   /** Return candidate tokens for the momentum scan. */
   scan(limit: number): Promise<TokenSnapshot[]>;
+  /**
+   * One mint only (single-coin pin). Optional so older test doubles still compile.
+   * Must not fall back to a board scan.
+   */
+  lookup?(mint: string): Promise<TokenSnapshot | null>;
   /** Latest price for an open position mint (may return null if unknown). */
   getPrice(mint: string): Promise<number | null>;
   /**
@@ -110,6 +115,12 @@ export class MockMarketData implements MarketDataProvider {
     return snaps;
   }
 
+  /** Single mock coin, without advancing the scripted tick. */
+  async lookup(mint: string): Promise<TokenSnapshot | null> {
+    const snaps = this.snapshotAt(this.tick, Date.now());
+    return snaps.find((s) => s.mint === mint) ?? null;
+  }
+
   async getPrice(mint: string): Promise<number | null> {
     // Peek current tick without advancing (exits checked before scan in the loop).
     const snaps = this.snapshotAt(this.tick, Date.now());
@@ -171,6 +182,11 @@ export class DexScreenerMarketData implements MarketDataProvider {
       log.warn("DexScreener scan failed", err);
       return [];
     }
+  }
+
+  /** One Solana mint via DexScreener token endpoint. No board scan. */
+  async lookup(mint: string): Promise<TokenSnapshot | null> {
+    return this.fetchPair(mint);
   }
 
   private async fetchPair(

@@ -2,7 +2,10 @@
  * Controllable paper bot engine — start/stop from CLI or HTTP control API.
  * Live trading remains stubbed; start() refuses unless PAPER_MODE=true.
  */
-import type { BotConfig, Fill, PortfolioSnapshot, Position, TradeRecord } from "../types.js";
+import type { BotConfig, Fill, PortfolioSnapshot, Position, TokenSnapshot, TradeRecord } from "../types.js";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { parseSolanaMintInput } from "../target/solanaMint.js";
 import type { MarketDataProvider } from "../market/data.js";
 import { createMarketData } from "../market/data.js";
 import { IN_POSITION_POLL_INTERVAL_MS } from "../market/http.js";
@@ -63,6 +66,10 @@ export interface EngineStatus {
   stopReason: string | null;
   /** Paper chase lockout (laptop/API persisted). Timer-only unlock. */
   chaseLockout: ChaseLockoutStatus;
+  /** Pinned contract address, or null when hunting the board. */
+  pinnedMint: string | null;
+  pinnedSymbol: string | null;
+  pinnedName: string | null;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -116,6 +123,10 @@ export class BotEngine {
   private stopReason: string | null = null;
   private abort: AbortController | null = null;
   private loopPromise: Promise<void> | null = null;
+  /** Single-coin pin. Null = normal hunt. Persisted beside the ledger. */
+  private pinnedMint: string | null = null;
+  private pinnedSymbol: string | null = null;
+  private pinnedName: string | null = null;
 
   /** Where PATCH / preset persist the paper overlay (default data/runtime-config.json). */
   private readonly runtimeConfigPath: string | undefined;
@@ -147,6 +158,7 @@ export class BotEngine {
     this.chaseLockout =
       deps?.chaseLockout ?? new ChaseLockoutStore(cfg.ledgerDir);
     this.runtimeConfigPath = deps?.runtimeConfigPath;
+    this.loadPinnedMint();
     // Backfill mint/CA on old journal rows from in-memory session fills
     // (disk trades.json already applied inside TradeJournal constructor).
     const sessionFills = this.ledger.getTrades(10_000).map((t) => t.fill);
@@ -178,7 +190,190 @@ export class BotEngine {
       marketDataSource: this.cfg.marketDataSource,
       stopReason: this.stopReason,
       chaseLockout: this.chaseLockout.getStatus(),
+      pinnedMint: this.pinnedMint,
+      pinnedSymbol: this.pinnedSymbol,
+      pinnedName: this.pinnedName,
     };
+  }
+
+  /** Absolute path of data/pinned-mint.json (or the ledger dir equivalent). */
+  pinnedMintPath(): string {
+    return join(this.cfg.ledgerDir, "pinned-mint.json");
+  }
+
+  private loadPinnedMint(): void {
+    const path = this.pinnedMintPath();
+    if (!existsSync(path)) return;
+    try {
+      const raw = JSON.parse(readFileSync(path, "utf8")) as {
+        mint?: unknown;
+        symbol?: unknown;
+        name?: unknown;
+      };
+      const parsed = parseSolanaMintInput(raw.mint);
+      if (!parsed.ok) {
+        log.warn("Ignoring pinned-mint.json — mint is not a Solana address");
+        return;
+      }
+      this.pinnedMint = parsed.mint;
+      this.pinnedSymbol =
+        typeof raw.symbol === "string" && raw.symbol.trim()
+          ? raw.symbol.trim().slice(0, 32)
+          : null;
+      this.pinnedName =
+        typeof raw.name === "string" && raw.name.trim()
+          ? raw.name.trim().slice(0, 80)
+          : null;
+    } catch (err) {
+      log.warn("Ignoring unreadable pinned-mint.json", err);
+    }
+  }
+
+  private savePinnedMint(): void {
+    const path = this.pinnedMintPath();
+    mkdirSync(dirname(path), { recursive: true });
+    if (!this.pinnedMint) {
+      if (existsSync(path)) unlinkSync(path);
+      return;
+    }
+    const body = {
+      mint: this.pinnedMint,
+      symbol: this.pinnedSymbol,
+      name: this.pinnedName,
+    };
+    writeFileSync(path, JSON.stringify(body, null, 2) + "\n", "utf8");
+  }
+
+  /**
+   * Pin the bot to one Solana mint. Does not close an open trade on another
+   * coin — that position keeps its normal exits. New entries only consider
+   * this mint (and only when a slot is free). Risk gates are unchanged.
+   * Allowed while the runner is going; paper mode only.
+   */
+  setPinnedMint(body: unknown): {
+    ok: boolean;
+    message: string;
+    status: EngineStatus;
+    mint: string | null;
+  } {
+    if (!this.cfg.paperMode) {
+      return {
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing to pin a coin while live mode is configured (live is stubbed).",
+        status: this.getStatus(),
+        mint: this.pinnedMint,
+      };
+    }
+    const raw =
+      body && typeof body === "object" && "mint" in body
+        ? (body as { mint?: unknown }).mint
+        : body;
+    const parsed = parseSolanaMintInput(raw);
+    if (!parsed.ok) {
+      return {
+        ok: false,
+        message: parsed.message,
+        status: this.getStatus(),
+        mint: this.pinnedMint,
+      };
+    }
+    const changed = parsed.mint !== this.pinnedMint;
+    this.pinnedMint = parsed.mint;
+    if (changed) {
+      this.pinnedSymbol = null;
+      this.pinnedName = null;
+    }
+    this.savePinnedMint();
+    const others = this.ledger.openPositions.filter((p) => p.mint !== parsed.mint);
+    let message = `Watching this coin only: ${parsed.mint}. Clear it to go back to hunting.`;
+    if (others.length > 0) {
+      const names = others
+        .map((p) => p.symbol || `${p.mint.slice(0, 4)}…`)
+        .join(", ");
+      message += ` Open trade (${names}) stays open until its own exit — it is not closed because you pinned a new coin. New buys are only this coin, and only when a free slot exists.`;
+    }
+    message +=
+      " Bankroll, max position, daily loss, vault, chase lockout, and exit rules still apply. The coin still has to pass the momentum checks before a buy.";
+    log.info("Pinned single coin", { mint: parsed.mint, openOthers: others.length });
+    return {
+      ok: true,
+      message,
+      status: this.getStatus(),
+      mint: this.pinnedMint,
+    };
+  }
+
+  /** Clear the pin. Next cycle hunts the board again. Does not close trades. */
+  clearPinnedMint(): {
+    ok: boolean;
+    message: string;
+    status: EngineStatus;
+    mint: string | null;
+  } {
+    if (!this.cfg.paperMode) {
+      return {
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing to clear the pin while live mode is configured (live is stubbed).",
+        status: this.getStatus(),
+        mint: this.pinnedMint,
+      };
+    }
+    const had = this.pinnedMint;
+    this.pinnedMint = null;
+    this.pinnedSymbol = null;
+    this.pinnedName = null;
+    this.savePinnedMint();
+    return {
+      ok: true,
+      message: had
+        ? "Pin cleared. The bot is hunting the board again."
+        : "Already hunting. No coin is pinned.",
+      status: this.getStatus(),
+      mint: null,
+    };
+  }
+
+  /**
+   * Entry universe for this cycle.
+   * Pin set → lookup that mint only (no board scan).
+   * Pin empty → normal hunt scan.
+   */
+  async selectEntrySnapshots(): Promise<TokenSnapshot[]> {
+    const pin = this.pinnedMint;
+    if (!pin) {
+      return this.market.scan(this.cfg.runner.scanLimit);
+    }
+    const lookup = this.market.lookup;
+    if (!lookup) {
+      log.warn(
+        `Pinned ${pin.slice(0, 8)}… but market data has no single-coin lookup; not hunting other coins`,
+      );
+      return [];
+    }
+    let snap: TokenSnapshot | null = null;
+    try {
+      snap = await lookup.call(this.market, pin);
+    } catch (err) {
+      log.warn(`Pinned mint lookup failed for ${pin.slice(0, 8)}…`, err);
+      return [];
+    }
+    if (!snap || snap.mint !== pin) {
+      log.info(
+        `Pinned ${pin.slice(0, 8)}…: no quote this cycle (still not hunting other coins)`,
+      );
+      return [];
+    }
+    if (
+      snap.symbol !== this.pinnedSymbol ||
+      (snap.name ?? null) !== this.pinnedName
+    ) {
+      this.pinnedSymbol = snap.symbol;
+      this.pinnedName = snap.name ?? null;
+      this.savePinnedMint();
+    }
+    return [snap];
   }
 
   /** Public config — BotConfig has no secrets; wallet paths stay out of this object. */
@@ -900,6 +1095,7 @@ export class BotEngine {
       bankrollUsd: cfg.bankrollUsd,
       maxOpenTrades: cfg.maxOpenTrades,
       source: cfg.marketDataSource,
+      pinnedMint: this.pinnedMint,
       maxHoldMinutes: cfg.maxHoldMinutes,
       dailyLossUsd: cfg.dailyLossUsd,
       takeProfitPct: cfg.takeProfitPct,
@@ -1086,7 +1282,7 @@ export class BotEngine {
       return false;
     }
 
-    const snaps = await market.scan(cfg.runner.scanLimit);
+    const snaps = await this.selectEntrySnapshots();
 
     const openMints = new Set(ledger.openPositions.map((p) => p.mint));
     const { signals: entries, rejects } = evaluateEntries(

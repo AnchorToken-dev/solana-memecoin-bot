@@ -16,6 +16,8 @@ let tab: Tab = "status";
 let message = "";
 let error = "";
 let busy = false;
+/** Draft CA so an 8s refresh does not wipe a paste in progress. */
+let pinDraft = "";
 
 function money(n: unknown): string {
   const x = typeof n === "number" ? n : Number(n);
@@ -184,6 +186,7 @@ async function paintStatus(main: Element) {
       <div class="row"><span class="k">State</span><span class="v">${escapeHtml(String(status.state))}</span></div>
       <div class="row"><span class="k">Cycle</span><span class="v">${escapeHtml(String(status.cycle ?? 0))}</span></div>
       <div class="row"><span class="k">Source</span><span class="v">${escapeHtml(String(status.marketDataSource ?? "—"))}</span></div>
+      ${pinStatusBlock(status)}
       <div class="row"><span class="k">Take-profit</span><span class="v">${tp == null ? "—" : tp <= 0 ? "off" : `+${tp}%`}</span></div>
       <div class="row"><span class="k">Trail</span><span class="v">${
         trail?.activatePct != null && trail?.distancePct != null
@@ -245,7 +248,8 @@ async function paintControl(main: Element) {
         <button class="secondary" id="refresh">Refresh</button>
       </div>
       <p class="muted" style="margin-top:10px"><strong>Exit now</strong> / <strong>Reset</strong> live on the <strong>PnL</strong> tab (near equity / open position). Change take-profit via server env <code>TAKE_PROFIT_PCT</code> (default 25; 0 = off).</p>
-    </div>`;
+    </div>
+    ${pinCard(status)}`;
   main.querySelector("#start")?.addEventListener("click", () => {
     void withBusy(async () => {
       await onStartRequestAlerts();
@@ -260,6 +264,75 @@ async function paintControl(main: Element) {
     });
   });
   main.querySelector("#refresh")?.addEventListener("click", () => void render());
+  const pinInput = main.querySelector("#pinMint") as HTMLInputElement | null;
+  pinInput?.addEventListener("input", () => {
+    pinDraft = pinInput.value;
+  });
+  main.querySelector("#pinWatch")?.addEventListener("click", () => {
+    const mint = (main.querySelector("#pinMint") as HTMLInputElement).value;
+    pinDraft = mint;
+    void withBusy(async () => {
+      const r = await api.setTarget(mint);
+      message = r.message;
+      if (r.ok) pinDraft = "";
+    });
+  });
+  main.querySelector("#pinClear")?.addEventListener("click", () => {
+    void withBusy(async () => {
+      const r = await api.clearTarget();
+      message = r.message;
+      pinDraft = "";
+    });
+  });
+}
+
+function pinnedMintOf(status: Record<string, unknown>): string {
+  return typeof status.pinnedMint === "string" ? status.pinnedMint.trim() : "";
+}
+
+function pinStatusBlock(status: Record<string, unknown>): string {
+  const mint = pinnedMintOf(status);
+  const symbol = typeof status.pinnedSymbol === "string" ? status.pinnedSymbol.trim() : "";
+  if (!mint) {
+    return `<div class="pin-status">
+      <div class="pinned-label">Hunting the board</div>
+      <p class="pin-lead">No coin pinned.</p>
+    </div>`;
+  }
+  return `<div class="pin-status">
+    <div class="pinned-label">Watching this coin</div>
+    ${symbol ? `<div class="pinned-symbol">${escapeHtml(symbol)}</div>` : ""}
+    <div class="pinned-mint">${escapeHtml(mint)}</div>
+  </div>`;
+}
+
+function pinCard(status: Record<string, unknown>): string {
+  const mint = pinnedMintOf(status);
+  const symbol = typeof status.pinnedSymbol === "string" ? status.pinnedSymbol.trim() : "";
+  const banner = error
+    ? `<p class="pin-error">${escapeHtml(error)}</p>`
+    : message
+      ? `<p class="pin-ok">${escapeHtml(message)}</p>`
+      : "";
+  return `<div class="card pin-card">
+    <h2>Watch one coin</h2>
+    <p class="pin-lead">Paste a Solana contract address. The bot works that coin only. Clear the box to hunt the board again.</p>
+    ${banner}
+    <div class="pinned-label">${mint ? "Watching this coin" : "Hunting the board"}</div>
+    ${symbol ? `<div class="pinned-symbol">${escapeHtml(symbol)}</div>` : ""}
+    ${
+      mint
+        ? `<div class="pinned-mint">${escapeHtml(mint)}</div>`
+        : `<p class="pin-lead">No coin pinned. The bot keeps its normal hunt.</p>`
+    }
+    <label class="pin-label" for="pinMint">Contract address</label>
+    <input id="pinMint" class="pin-input" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste the mint / CA" value="${escapeAttr(pinDraft)}" />
+    <div class="actions">
+      <button class="primary pin-action" id="pinWatch" ${busy ? "disabled" : ""}>Watch this coin</button>
+      <button class="secondary pin-action" id="pinClear" ${busy || !mint ? "disabled" : ""}>Clear and hunt</button>
+    </div>
+    <p class="pin-lead">Risk limits still apply: bankroll, max position, daily loss, vault, chase lockout, and exits. If another coin is already open, that trade finishes on its own — it is not closed just because you pin a new address. A buy still waits for the momentum rules.</p>
+  </div>`;
 }
 
 async function paintBankroll(main: Element) {
@@ -1088,6 +1161,8 @@ void render();
 setInterval(() => {
   void pollSessionAlerts();
   if (busy || document.hidden || tab === "settings" || tab === "checklist") return;
+  const active = document.activeElement as HTMLElement | null;
+  if (active && active.id === "pinMint") return;
   // Keep the live chart iframe mounted; only soft-update numbers on PnL.
   if (tab === "bankroll" && document.querySelector(".chart-frame")) {
     void softRefreshBankroll();

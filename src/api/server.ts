@@ -88,6 +88,59 @@ export function createControlApp(engine: BotEngine) {
   app.put("/config", patchConfigHandler);
 
   /**
+   * Single-coin pin. Empty / cleared = normal hunt.
+   * Does not close an open position on a different mint.
+   * Paper mode only. Allowed while the runner is going.
+   */
+  app.get("/target", (_req, res) => {
+    const status = engine.getStatus();
+    res.json({
+      mode: status.pinnedMint ? "pinned" : "hunt",
+      mint: status.pinnedMint,
+      symbol: status.pinnedSymbol,
+      name: status.pinnedName,
+    });
+  });
+
+  const setTarget = (req: express.Request, res: express.Response): void => {
+    if (!engine.cfg.paperMode) {
+      res.status(403).json({
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing to pin a coin while live mode is configured (live is stubbed).",
+        status: engine.getStatus(),
+      });
+      return;
+    }
+    const result = engine.setPinnedMint(req.body);
+    res.status(result.ok ? 200 : 400).json({
+      ...result,
+      mode: result.mint ? "pinned" : "hunt",
+    });
+  };
+  app.post("/target", setTarget);
+  app.put("/target", setTarget);
+
+  const clearTarget = (_req: express.Request, res: express.Response): void => {
+    if (!engine.cfg.paperMode) {
+      res.status(403).json({
+        ok: false,
+        message:
+          "PAPER_MODE only: refusing to clear the pin while live mode is configured (live is stubbed).",
+        status: engine.getStatus(),
+      });
+      return;
+    }
+    const result = engine.clearPinnedMint();
+    res.status(result.ok ? 200 : 403).json({
+      ...result,
+      mode: result.mint ? "pinned" : "hunt",
+    });
+  };
+  app.delete("/target", clearTarget);
+  app.post("/target/clear", clearTarget);
+
+  /**
    * Apply named preset: { "preset": "momentum" | "sniper" }.
    * Requires runner stopped; persists overlay.
    */
