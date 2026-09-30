@@ -25,6 +25,17 @@ function money(n: unknown): string {
   return `$${x.toFixed(2)}`;
 }
 
+/**
+ * Display the API win percentage. Missing / null (zero decided closes) is an em dash,
+ * not 0%, so an empty journal is not a fake stat. Does not recompute from counts.
+ */
+function formatWinPct(winPct: number | null | undefined): string {
+  if (typeof winPct !== "number" || !Number.isFinite(winPct)) return "—";
+  const rounded = Math.round(winPct * 10) / 10;
+  const body = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  return `${body}%`;
+}
+
 /** Format quote-asset amount (SOL etc.) with ticker label. */
 function quoteAmt(n: unknown, asset = "SOL"): string {
   const x = typeof n === "number" ? n : Number(n);
@@ -705,9 +716,14 @@ async function paintJournal(main: Element) {
               p.quoteBasis && p.quoteBasis !== "recorded"
                 ? ` <span class="muted">(${escapeHtml(p.quoteBasis)})</span>`
                 : "";
+            const winText = formatWinPct(p.winPct);
+            const winEmpty = winText === "—";
             return `<div class="summary-cell">
               <div class="summary-label">${escapeHtml(p.label)}</div>
-              <div class="${cls}">${money(p.pnlUsd)}</div>
+              <div class="summary-headline">
+                <div class="${cls} summary-pnl">${money(p.pnlUsd)}</div>
+                <div class="summary-winpct${winEmpty ? " is-empty" : ""}" aria-label="Win percentage">${escapeHtml(winText)}</div>
+              </div>
               <div class="muted">${escapeHtml(q)}${basis}</div>
               <div class="muted">${p.tradeCount} trade${p.tradeCount === 1 ? "" : "s"} · ${p.winCount}W/${p.lossCount}L</div>
             </div>`;

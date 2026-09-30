@@ -191,6 +191,24 @@ input[type="number"] {
   letter-spacing: 0.04em;
   margin-bottom: 4px;
 }
+/* Win % sits beside P&L at reading size (no glasses), not helper text. */
+.journal-summary .summary-headline {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.journal-summary .summary-pnl,
+.journal-summary .summary-winpct {
+  font-size: 1.55rem;
+  font-weight: 800;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.journal-summary .summary-winpct.is-empty {
+  color: var(--muted);
+}
 
 .journal-row {
   display: block;

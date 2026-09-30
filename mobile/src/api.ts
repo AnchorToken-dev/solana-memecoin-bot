@@ -225,6 +225,8 @@ export const api = {
           tradeCount: number;
           winCount: number;
           lossCount: number;
+          /** null when there are no decided closes (not a fake 0%). */
+          winPct?: number | null;
           pnlUsd: number;
           sizeUsd: number;
           pnlQuote: number | null;
