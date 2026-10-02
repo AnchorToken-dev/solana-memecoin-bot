@@ -197,6 +197,7 @@ async function paintStatus(main: Element) {
       <div class="row"><span class="k">State</span><span class="v">${escapeHtml(String(status.state))}</span></div>
       <div class="row"><span class="k">Cycle</span><span class="v">${escapeHtml(String(status.cycle ?? 0))}</span></div>
       <div class="row"><span class="k">Source</span><span class="v">${escapeHtml(String(status.marketDataSource ?? "—"))}</span></div>
+      <div class="row"><span class="k">Solana RPC</span><span class="v">${status.solanaRpcConfigured === true ? "configured (read-only)" : "not configured"}</span></div>
       ${pinStatusBlock(status)}
       <div class="row"><span class="k">Take-profit</span><span class="v">${tp == null ? "—" : tp <= 0 ? "off" : `+${tp}%`}</span></div>
       <div class="row"><span class="k">Trail</span><span class="v">${

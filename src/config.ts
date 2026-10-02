@@ -4,6 +4,7 @@ import { config as loadDotenv } from "dotenv";
 import { z } from "zod";
 import type { ActivePreset, BotConfig } from "./types.js";
 import { PRESETS, isPresetName, type PresetName } from "./presets.js";
+import { solanaRpcIsConfigured } from "./solana/rpc.js";
 
 loadDotenv();
 
@@ -47,6 +48,8 @@ const ConfigSchema = z.object({
   ledgerDir: z.string().min(1),
   activePreset: z.enum(["momentum", "sniper", "custom"]),
   requireChecklistGo: z.boolean(),
+  /** Derived from SOLANA_RPC_URL presence. Never the URL itself. */
+  solanaRpcConfigured: z.boolean(),
 });
 
 /** Paper-safe knobs allowed on PATCH /config. */
@@ -99,6 +102,8 @@ const LIVE_DANGEROUS_KEYS = new Set([
   "rpcUrl",
   "LIVE_RPC_URL",
   "LIVE_WALLET_KEYPAIR_PATH",
+  "SOLANA_RPC_URL",
+  "solanaRpcUrl",
 ]);
 
 function envBool(key: string, fallback: boolean): boolean {
@@ -472,6 +477,8 @@ export function loadConfig(opts?: {
       "REQUIRE_CHECKLIST_GO",
       file.requireChecklistGo ?? false,
     ),
+    // Presence only. The URL stays in the environment and is not copied onto cfg.
+    solanaRpcConfigured: solanaRpcIsConfigured(),
   };
 
   if (!opts?.skipRuntimeOverlay) {

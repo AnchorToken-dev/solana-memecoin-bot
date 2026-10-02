@@ -70,6 +70,11 @@ export interface EngineStatus {
   pinnedMint: string | null;
   pinnedSymbol: string | null;
   pinnedName: string | null;
+  /**
+   * Whether SOLANA_RPC_URL is set. Boolean only — the URL is never returned.
+   * False keeps today's pump.fun HTTP paper loop (RPC is not required).
+   */
+  solanaRpcConfigured: boolean;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -193,6 +198,7 @@ export class BotEngine {
       pinnedMint: this.pinnedMint,
       pinnedSymbol: this.pinnedSymbol,
       pinnedName: this.pinnedName,
+      solanaRpcConfigured: this.cfg.solanaRpcConfigured === true,
     };
   }
 
