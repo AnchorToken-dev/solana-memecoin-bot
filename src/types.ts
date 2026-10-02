@@ -84,6 +84,12 @@ export interface BotConfig {
    * for that mint. Default false — checklist is advisory only (v1).
    */
   requireChecklistGo: boolean;
+  /**
+   * True when SOLANA_RPC_URL is set. The URL itself is never stored here
+   * (so /config and /status cannot leak it). Unset → paper loop unchanged.
+   * Optional on the type so older test fixtures still compile; loadConfig sets it.
+   */
+  solanaRpcConfigured?: boolean;
 }
 
 export interface TokenSnapshot {
