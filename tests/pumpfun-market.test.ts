@@ -51,6 +51,9 @@ const sampleCoin = {
   virtual_sol_reserves: 30_000_000_000,
   complete: false,
   is_banned: false,
+  creator: "Creator111111111111111111111111111111111",
+  bonding_curve: "CurvePda11111111111111111111111111111111",
+  associated_bonding_curve: "AssocCurve111111111111111111111111111111",
 };
 
 describe("pumpfun helpers", () => {
@@ -105,6 +108,12 @@ describe("PumpFunMarketData (mocked HTTP)", () => {
     assert.equal(snaps[0]!.symbol, "TST");
     assert.ok(snaps[0]!.priceUsd > 0);
     assert.equal(snaps[0]!.liquidityUsd, 1000);
+    assert.equal(snaps[0]!.creator, sampleCoin.creator);
+    assert.equal(snaps[0]!.bondingCurve, sampleCoin.bonding_curve);
+    assert.equal(
+      snaps[0]!.associatedBondingCurve,
+      sampleCoin.associated_bonding_curve,
+    );
     assert.ok(calls.some((u) => u.startsWith(PUMPFUN_FRONTEND_API_BASE_DEFAULT)));
 
     const px = await provider.getPrice(sampleCoin.mint);

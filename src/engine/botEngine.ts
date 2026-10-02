@@ -44,6 +44,12 @@ import {
 import { quoteUsdRateFromEnv } from "../market/data.js";
 import { ResearchChecklistStore } from "../checklist/checklist.js";
 import {
+  rugFilterInputFromConfig,
+  runRugFilter,
+  type RugFilterRpc,
+} from "../risk/rugFilter.js";
+import { ReadOnlySolanaRpc } from "../solana/rpc.js";
+import {
   SessionEventBus,
   exitEventType,
   exitTitle,
@@ -135,6 +141,8 @@ export class BotEngine {
 
   /** Where PATCH / preset persist the paper overlay (default data/runtime-config.json). */
   private readonly runtimeConfigPath: string | undefined;
+  /** undefined = fromEnv when needed; null = explicitly no RPC. */
+  private readonly solanaRpcOverride: RugFilterRpc | null | undefined;
 
   constructor(
     cfg: BotConfig,
@@ -148,6 +156,12 @@ export class BotEngine {
       chaseLockout?: ChaseLockoutStore;
       /** Absolute or relative path for runtime-config.json persistence. */
       runtimeConfigPath?: string;
+      /**
+       * Read-only RPC for the rug filter.
+       * undefined = use SOLANA_RPC_URL when the filter is on.
+       * null = no RPC (filter-on skips the buy).
+       */
+      solanaRpc?: RugFilterRpc | null;
     },
   ) {
     this.cfg = cfg;
@@ -163,6 +177,7 @@ export class BotEngine {
     this.chaseLockout =
       deps?.chaseLockout ?? new ChaseLockoutStore(cfg.ledgerDir);
     this.runtimeConfigPath = deps?.runtimeConfigPath;
+    this.solanaRpcOverride = deps?.solanaRpc;
     this.loadPinnedMint();
     // Backfill mint/CA on old journal rows from in-memory session fills
     // (disk trades.json already applied inside TradeJournal constructor).
@@ -1334,6 +1349,49 @@ export class BotEngine {
         `Skip entry ${entry.symbol}: requireChecklistGo — no GO checklist for mint`,
       );
       return false;
+    }
+
+    if (cfg.rugFilterEnabled === true) {
+      const rpc =
+        this.solanaRpcOverride !== undefined
+          ? this.solanaRpcOverride
+          : ReadOnlySolanaRpc.fromEnv();
+      let decision;
+      try {
+        const snap =
+          snaps.find((s) => s.mint === entry.mint) ?? {
+            mint: entry.mint,
+            symbol: entry.symbol,
+            name: entry.symbol,
+            priceUsd: entry.priceUsd,
+            changeWindowPct: 0,
+            volumeWindowUsd: 0,
+            volumeAvgUsd: 1,
+            volume24hUsd: 0,
+            liquidityUsd: 0,
+            timestamp: Date.now(),
+          };
+        decision = await runRugFilter(
+          rugFilterInputFromConfig(cfg, snap, rpc),
+        );
+      } catch (err) {
+        log.warn(
+          `Skip entry ${entry.symbol}: rug_filter_rpc_error (filter threw; paper buy skipped)`,
+          err,
+        );
+        return false;
+      }
+      if (decision.skipped.length > 0) {
+        log.info(
+          `Rug filter skipped checks for ${entry.symbol}: ${decision.skipped.join(", ")}`,
+        );
+      }
+      if (!decision.allow) {
+        log.info(
+          `Skip entry ${entry.symbol}: ${decision.reason}${decision.detail ? ` (${decision.detail})` : ""}`,
+        );
+        return false;
+      }
     }
 
     const { fill, position } = broker.applyBuy({
