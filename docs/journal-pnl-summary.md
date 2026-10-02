@@ -15,6 +15,9 @@ Calendar windows use **`America/New_York`** by default (`summary.timezone`):
 
 Only **closed** journal rows (realized exits) are counted. Session Reset does **not** clear the journal.
 
+Each period also includes **`winPct`**: `winCount / (winCount + lossCount) * 100`. Breakeven closes (`pnlUsd === 0`) are in `tradeCount` but not in the percentage. When there are no decided closes, `winPct` is **`null`** (the Journal tab shows **—**, not 0%). The mobile UI displays that field; it does not recompute it.
+
+
 ## USD + quote asset (SOL)
 
 Paper fills stay **USD-primary**. Each new close also stores:
@@ -51,7 +54,7 @@ UI and API use **`quoteAsset`** / **`chainId`** rather than hard-coding “SOL�
     "chainId": "solana",
     "estimateQuoteUsdRate": 150,
     "periods": [
-      { "period": "daily", "label": "Today", "pnlUsd": 0, "pnlQuote": 0, "tradeCount": 0, "winCount": 0, "lossCount": 0, "quoteBasis": "usd_only" }
+      { "period": "daily", "label": "Today", "pnlUsd": 0, "pnlQuote": 0, "tradeCount": 0, "winCount": 0, "lossCount": 0, "winPct": null, "quoteBasis": "usd_only" }
     ]
   }
 }

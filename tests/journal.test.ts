@@ -665,6 +665,63 @@ describe("journal P&L summary + quote asset", () => {
     }
   });
 
+  it("winPct is null with zero decided closes and wins/(wins+losses) otherwise", () => {
+    const dir = mkdtempSync(join(tmpdir(), "journal-winpct-"));
+    try {
+      const j = new TradeJournal(dir);
+      const nowMs = Date.parse("2026-09-23T19:00:00.000Z");
+      const empty = j.list({ nowMs, timeZone: "America/New_York" });
+      assert.equal(empty.summary.periods.length, 4);
+      for (const period of empty.summary.periods) {
+        assert.equal(period.tradeCount, 0);
+        assert.equal(period.winCount, 0);
+        assert.equal(period.lossCount, 0);
+        assert.equal(period.winPct, null);
+      }
+
+      const close = (id: string, pnlUsd: number) => {
+        j.appendClose({
+          position: {
+            id,
+            mint: id,
+            symbol: id,
+            side: "long",
+            qty: 1,
+            entryPrice: 1,
+            entryNotionalUsd: 10,
+            entryFeesUsd: 0,
+            highWaterPrice: 1,
+            trailArmed: false,
+            openedAt: nowMs - 120_000,
+          },
+          exitPrice: 1,
+          pnlUsd,
+          exitReason: pnlUsd >= 0 ? "take_profit" : "stop_loss",
+          fillId: id,
+          timestamp: nowMs - 60_000,
+          quoteUsdRate: 100,
+        });
+      };
+      close("winA", 4);
+      close("winB", 1);
+      close("lossA", -3);
+      close("flat", 0); // breakeven: counted as a trade, not a win or a loss
+
+      const { summary } = j.list({ nowMs, timeZone: "America/New_York" });
+      const by = Object.fromEntries(summary.periods.map((period) => [period.period, period]));
+      for (const key of ["daily", "weekly", "monthly", "overall"] as const) {
+        const period = by[key]!;
+        assert.equal(period.tradeCount, 4);
+        assert.equal(period.winCount, 2);
+        assert.equal(period.lossCount, 1);
+        assert.ok(period.winPct != null);
+        assert.ok(Math.abs(period.winPct - (2 / 3) * 100) < 1e-9);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("engine records quote rate from market.getQuoteUsdRate on close", async () => {
     const dir = mkdtempSync(join(tmpdir(), "journal-eng-sol-"));
     try {

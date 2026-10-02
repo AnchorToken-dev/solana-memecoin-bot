@@ -91,6 +91,12 @@ export interface JournalPeriodSummary {
   tradeCount: number;
   winCount: number;
   lossCount: number;
+  /**
+   * wins / (wins + losses) * 100.
+   * null when there are no decided closes (no trades, or only breakevens)
+   * so clients do not paint a fake 0%.
+   */
+  winPct: number | null;
   pnlUsd: number;
   sizeUsd: number;
   /** Sum of quote PnL (recorded + estimated); null if nothing convertible. */
@@ -283,6 +289,13 @@ function quoteForEntry(
   };
 }
 
+/** Win % from decided closes only. null when wins + losses is 0. */
+function journalWinPct(winCount: number, lossCount: number): number | null {
+  const decided = winCount + lossCount;
+  if (!Number.isFinite(decided) || decided <= 0) return null;
+  return (winCount / decided) * 100;
+}
+
 function mergeBasis(
   a: QuoteBasis | "mixed" | null,
   b: QuoteBasis,
@@ -335,6 +348,7 @@ function buildPeriod(
     tradeCount,
     winCount,
     lossCount,
+    winPct: journalWinPct(winCount, lossCount),
     pnlUsd,
     sizeUsd,
     pnlQuote: quoteRows > 0 ? pnlQuoteSum : null,
