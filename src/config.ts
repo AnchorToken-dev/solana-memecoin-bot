@@ -50,6 +50,9 @@ const ConfigSchema = z.object({
   requireChecklistGo: z.boolean(),
   /** Derived from SOLANA_RPC_URL presence. Never the URL itself. */
   solanaRpcConfigured: z.boolean(),
+  rugFilterEnabled: z.boolean(),
+  rugFilterMaxTopHolderPct: z.number().gt(0).lte(100),
+  rugFilterMaxSameSlotBuys: z.number().int().nonnegative(),
 });
 
 /** Paper-safe knobs allowed on PATCH /config. */
@@ -76,6 +79,10 @@ export const PaperPatchSchema = z
     activePreset: z.enum(["momentum", "sniper", "custom"]).optional(),
     /** Gate paper entries on a GO checklist for the mint (default off / advisory). */
     requireChecklistGo: z.boolean().optional(),
+    /** Pre-buy rug filter. Default off. Not a strategy preset knob. */
+    rugFilterEnabled: z.boolean().optional(),
+    rugFilterMaxTopHolderPct: z.number().gt(0).lte(100).optional(),
+    rugFilterMaxSameSlotBuys: z.number().int().nonnegative().optional(),
   })
   .strict();
 
@@ -223,6 +230,15 @@ export function overlayFromConfig(cfg: BotConfig): RuntimeOverlay {
     },
     activePreset: cfg.activePreset,
     requireChecklistGo: cfg.requireChecklistGo,
+    ...(typeof cfg.rugFilterEnabled === "boolean"
+      ? { rugFilterEnabled: cfg.rugFilterEnabled }
+      : {}),
+    ...(typeof cfg.rugFilterMaxTopHolderPct === "number"
+      ? { rugFilterMaxTopHolderPct: cfg.rugFilterMaxTopHolderPct }
+      : {}),
+    ...(typeof cfg.rugFilterMaxSameSlotBuys === "number"
+      ? { rugFilterMaxSameSlotBuys: cfg.rugFilterMaxSameSlotBuys }
+      : {}),
   };
 }
 
@@ -265,6 +281,15 @@ function applyOverlay(cfg: BotConfig, overlay: RuntimeOverlay): void {
   }
   if (overlay.requireChecklistGo != null) {
     cfg.requireChecklistGo = overlay.requireChecklistGo;
+  }
+  if (overlay.rugFilterEnabled != null) {
+    cfg.rugFilterEnabled = overlay.rugFilterEnabled;
+  }
+  if (overlay.rugFilterMaxTopHolderPct != null) {
+    cfg.rugFilterMaxTopHolderPct = overlay.rugFilterMaxTopHolderPct;
+  }
+  if (overlay.rugFilterMaxSameSlotBuys != null) {
+    cfg.rugFilterMaxSameSlotBuys = overlay.rugFilterMaxSameSlotBuys;
   }
 }
 
@@ -373,6 +398,15 @@ export function applyPaperPatch(cfg: BotConfig, patch: PaperConfigPatch): void {
   if (patch.requireChecklistGo != null) {
     cfg.requireChecklistGo = patch.requireChecklistGo;
   }
+  if (patch.rugFilterEnabled != null) {
+    cfg.rugFilterEnabled = patch.rugFilterEnabled;
+  }
+  if (patch.rugFilterMaxTopHolderPct != null) {
+    cfg.rugFilterMaxTopHolderPct = patch.rugFilterMaxTopHolderPct;
+  }
+  if (patch.rugFilterMaxSameSlotBuys != null) {
+    cfg.rugFilterMaxSameSlotBuys = patch.rugFilterMaxSameSlotBuys;
+  }
   if (patch.activePreset) {
     cfg.activePreset = patch.activePreset;
   } else {
@@ -479,6 +513,18 @@ export function loadConfig(opts?: {
     ),
     // Presence only. The URL stays in the environment and is not copied onto cfg.
     solanaRpcConfigured: solanaRpcIsConfigured(),
+    rugFilterEnabled: envBool(
+      "RUG_FILTER_ENABLED",
+      file.rugFilterEnabled ?? false,
+    ),
+    rugFilterMaxTopHolderPct: envNum(
+      "RUG_FILTER_MAX_TOP_HOLDER_PCT",
+      file.rugFilterMaxTopHolderPct ?? 30,
+    ),
+    rugFilterMaxSameSlotBuys: envNum(
+      "RUG_FILTER_MAX_SAME_SLOT_BUYS",
+      file.rugFilterMaxSameSlotBuys ?? 3,
+    ),
   };
 
   if (!opts?.skipRuntimeOverlay) {

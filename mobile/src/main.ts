@@ -198,6 +198,7 @@ async function paintStatus(main: Element) {
       <div class="row"><span class="k">Cycle</span><span class="v">${escapeHtml(String(status.cycle ?? 0))}</span></div>
       <div class="row"><span class="k">Source</span><span class="v">${escapeHtml(String(status.marketDataSource ?? "—"))}</span></div>
       <div class="row"><span class="k">Solana RPC</span><span class="v">${status.solanaRpcConfigured === true ? "configured (read-only)" : "not configured"}</span></div>
+      <div class="row"><span class="k">Rug filter</span><span class="v">${cfg.rugFilterEnabled === true ? "on" : "off"}</span></div>
       ${pinStatusBlock(status)}
       <div class="row"><span class="k">Take-profit</span><span class="v">${tp == null ? "—" : tp <= 0 ? "off" : `+${tp}%`}</span></div>
       <div class="row"><span class="k">Trail</span><span class="v">${
@@ -918,6 +919,21 @@ async function paintSettings(main: Element, base: string) {
       ${running ? `<p class="muted warn-text" style="margin-top:8px">Stop the runner before changing this gate.</p>` : ""}
     </div>
     <div class="card">
+      <h2>Rug filter</h2>
+      <p class="muted">Paper only. Default <strong>off</strong> (same buys as today). When <strong>on</strong>, a buy is skipped if freeze authority is set, the top non-curve holder is above ${escapeHtml(String(cfg.rugFilterMaxTopHolderPct ?? 30))}%, or too many buys share the creation slot. Needs a read-only Solana RPC. If the RPC is not set, the buy is skipped. Does not send a live trade.</p>
+      <div class="row">
+        <span class="k">Pre-buy rug filter</span>
+        <span class="v">
+          <label class="toggle">
+            <input type="checkbox" id="rugFilterToggle" ${cfg.rugFilterEnabled === true ? "checked" : ""} ${busy||running?"disabled":""} />
+            <span>${cfg.rugFilterEnabled === true ? "On" : "Off"}</span>
+          </label>
+        </span>
+      </div>
+      <p class="muted">Dev rug history and wash volume are not checked (no data for them). The RPC address is never shown.</p>
+      ${running ? `<p class="muted warn-text" style="margin-top:8px">Stop the runner before changing this filter.</p>` : ""}
+    </div>
+    <div class="card">
       <h2>Session alerts</h2>
       <p class="muted">Local Android notifications for paper start/stop, opens, closes (with PnL), daily loss, and exit reasons. Default <strong>on</strong>.</p>
       <div class="row">
@@ -1023,6 +1039,13 @@ async function paintSettings(main: Element, base: string) {
     const on = (ev.target as HTMLInputElement).checked;
     void withBusy(async () => {
       const r = await api.patchConfig({ requireChecklistGo: on });
+      message = r.message;
+    });
+  });
+  main.querySelector("#rugFilterToggle")?.addEventListener("change", (ev) => {
+    const on = (ev.target as HTMLInputElement).checked;
+    void withBusy(async () => {
+      const r = await api.patchConfig({ rugFilterEnabled: on });
       message = r.message;
     });
   });

@@ -90,6 +90,19 @@ export interface BotConfig {
    * Optional on the type so older test fixtures still compile; loadConfig sets it.
    */
   solanaRpcConfigured?: boolean;
+  /**
+   * Pre-buy rug filter. Default false — paper entries behave exactly as today.
+   * When true and no read-only RPC is configured, that buy is skipped.
+   * Optional on the type so older fixtures compile; loadConfig sets it.
+   */
+  rugFilterEnabled?: boolean;
+  /** Reject when the top non-curve holder is above this % of supply. Default 30. */
+  rugFilterMaxTopHolderPct?: number;
+  /**
+   * Reject when more than this many other txs share the mint's creation slot.
+   * Default 3. Exactly this many is allowed.
+   */
+  rugFilterMaxSameSlotBuys?: number;
 }
 
 export interface TokenSnapshot {
@@ -109,6 +122,15 @@ export interface TokenSnapshot {
    * (Pump.fun `created_timestamp`, DexScreener `pairCreatedAt`).
    */
   createdAt?: number;
+  /**
+   * Pump.fun coin `creator`, when the list/lookup payload already includes it.
+   * Not used to fetch that wallet's other coins (no such source in this bot).
+   */
+  creator?: string;
+  /** Pump.fun `bonding_curve` account, when the payload already includes it. */
+  bondingCurve?: string;
+  /** Pump.fun `associated_bonding_curve` token account, when present. */
+  associatedBondingCurve?: string;
 }
 
 export type Side = "buy" | "sell";

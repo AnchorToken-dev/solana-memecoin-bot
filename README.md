@@ -35,6 +35,7 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 | Config file | `config/default.json` | `CONFIG_FILE` (e.g. `config/pumpfun-preset.json`) |
 | Control API | `0.0.0.0:8787` | `API_HOST` / `API_PORT` |
 | Solana RPC | off (not required) | `SOLANA_RPC_URL` unset. Read-only if set. `/status` shows `solanaRpcConfigured` true/false and never the URL. Paper loop still uses pump.fun HTTP when unset. |
+| Rug filter | **off** | `RUG_FILTER_ENABLED=false`. Paper only. See [docs/rug-filter.md](docs/rug-filter.md). Top holder default **30%**. Same-slot buys default **3**. |
 
 ### Named presets (Momentum | Sniper)
 

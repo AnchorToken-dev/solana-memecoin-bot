@@ -72,6 +72,10 @@ interface PumpCoin {
   reply_count?: number;
   nsfw?: boolean;
   is_banned?: boolean;
+  /** Already on the frontend payload when pump.fun sends it. Not a new request. */
+  creator?: string;
+  bonding_curve?: string;
+  associated_bonding_curve?: string;
 }
 
 interface PriceSample {
@@ -89,6 +93,14 @@ const BROWSERISH_HEADERS: Record<string, string> = {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Pump account strings already on the coin JSON. Ignore junk. */
+function pumpAccount(v: unknown): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const s = v.trim();
+  if (s.length < 32 || s.length > 44) return undefined;
+  return s;
 }
 
 function num(v: unknown, fallback = 0): number {
@@ -397,6 +409,9 @@ export class PumpFunMarketData {
     // List API has no volume windows — leave zeros until Dex enrich fills them.
     // volumeAvgUsd=1 avoids divide-by-zero in spike ratio if enrich misses.
     const createdAt = normalizeCreatedAtMs(coin.created_timestamp);
+    const creator = pumpAccount(coin.creator);
+    const bondingCurve = pumpAccount(coin.bonding_curve);
+    const associatedBondingCurve = pumpAccount(coin.associated_bonding_curve);
     return {
       mint: coin.mint,
       symbol: coin.symbol ?? "???",
@@ -409,6 +424,9 @@ export class PumpFunMarketData {
       liquidityUsd,
       timestamp: Date.now(),
       ...(createdAt != null ? { createdAt } : {}),
+      ...(creator ? { creator } : {}),
+      ...(bondingCurve ? { bondingCurve } : {}),
+      ...(associatedBondingCurve ? { associatedBondingCurve } : {}),
     };
   }
 
