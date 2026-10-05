@@ -61,7 +61,7 @@ Listening on ${host}:${port}. Runner starts STOPPED — use the app or POST /run
 
     const shutdown = async () => {
       log.info("Shutting down API…");
-      await engine.stop();
+      await engine.dispose();
       process.exit(0);
     };
     process.on("SIGINT", () => void shutdown());
@@ -74,7 +74,7 @@ Listening on ${host}:${port}. Runner starts STOPPED — use the app or POST /run
   // CLI: auto-start paper loop
   const shutdown = async () => {
     log.info("Shutting down…");
-    await engine.stop();
+    await engine.dispose();
     process.exit(0);
   };
   process.on("SIGINT", () => void shutdown());

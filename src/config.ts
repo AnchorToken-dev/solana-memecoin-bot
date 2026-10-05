@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { ActivePreset, BotConfig } from "./types.js";
 import { PRESETS, isPresetName, type PresetName } from "./presets.js";
 import { solanaRpcIsConfigured } from "./solana/rpc.js";
+import { solanaRpcWssIsConfigured } from "./solana/ws.js";
 
 loadDotenv();
 
@@ -50,6 +51,8 @@ const ConfigSchema = z.object({
   requireChecklistGo: z.boolean(),
   /** Derived from SOLANA_RPC_URL presence. Never the URL itself. */
   solanaRpcConfigured: z.boolean(),
+  /** Derived from SOLANA_RPC_WSS_URL presence. Never the URL itself. */
+  solanaRpcWssConfigured: z.boolean(),
   rugFilterEnabled: z.boolean(),
   rugFilterMaxTopHolderPct: z.number().gt(0).lte(100),
   rugFilterMaxSameSlotBuys: z.number().int().nonnegative(),
@@ -111,6 +114,8 @@ const LIVE_DANGEROUS_KEYS = new Set([
   "LIVE_WALLET_KEYPAIR_PATH",
   "SOLANA_RPC_URL",
   "solanaRpcUrl",
+  "SOLANA_RPC_WSS_URL",
+  "solanaRpcWssUrl",
 ]);
 
 function envBool(key: string, fallback: boolean): boolean {
@@ -513,6 +518,7 @@ export function loadConfig(opts?: {
     ),
     // Presence only. The URL stays in the environment and is not copied onto cfg.
     solanaRpcConfigured: solanaRpcIsConfigured(),
+    solanaRpcWssConfigured: solanaRpcWssIsConfigured(),
     rugFilterEnabled: envBool(
       "RUG_FILTER_ENABLED",
       file.rugFilterEnabled ?? false,

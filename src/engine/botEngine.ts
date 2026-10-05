@@ -50,6 +50,11 @@ import {
 } from "../risk/rugFilter.js";
 import { ReadOnlySolanaRpc } from "../solana/rpc.js";
 import {
+  ReadOnlySolanaWs,
+  emptySolanaWsStatus,
+  type SolanaWsPublicStatus,
+} from "../solana/ws.js";
+import {
   SessionEventBus,
   exitEventType,
   exitTitle,
@@ -81,6 +86,11 @@ export interface EngineStatus {
    * False keeps today's pump.fun HTTP paper loop (RPC is not required).
    */
   solanaRpcConfigured: boolean;
+  /**
+   * Optional read-only WSS listen status. URL never returned.
+   * When not configured, connected is false and state is disconnected.
+   */
+  solanaRpcWss: SolanaWsPublicStatus;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -143,6 +153,8 @@ export class BotEngine {
   private readonly runtimeConfigPath: string | undefined;
   /** undefined = fromEnv when needed; null = explicitly no RPC. */
   private readonly solanaRpcOverride: RugFilterRpc | null | undefined;
+  /** Optional WSS listener. null = not configured / disabled. */
+  private readonly solanaWs: ReadOnlySolanaWs | null;
 
   constructor(
     cfg: BotConfig,
@@ -162,6 +174,12 @@ export class BotEngine {
        * null = no RPC (filter-on skips the buy).
        */
       solanaRpc?: RugFilterRpc | null;
+      /**
+       * Optional read-only WSS listener.
+       * undefined = ReadOnlySolanaWs.fromEnv() when SOLANA_RPC_WSS_URL is set.
+       * null = force no WSS (tests).
+       */
+      solanaWs?: ReadOnlySolanaWs | null;
     },
   ) {
     this.cfg = cfg;
@@ -178,7 +196,25 @@ export class BotEngine {
       deps?.chaseLockout ?? new ChaseLockoutStore(cfg.ledgerDir);
     this.runtimeConfigPath = deps?.runtimeConfigPath;
     this.solanaRpcOverride = deps?.solanaRpc;
+    if (deps?.solanaWs !== undefined) {
+      this.solanaWs = deps.solanaWs;
+    } else if (this.cfg.solanaRpcWssConfigured === true) {
+      this.solanaWs = ReadOnlySolanaWs.fromEnv();
+    } else {
+      this.solanaWs = null;
+    }
     this.loadPinnedMint();
+    // Optional listen-only WSS. Fail-soft: never blocks paper/HTTPS paths.
+    if (this.solanaWs) {
+      try {
+        this.solanaWs.start();
+        if (this.pinnedMint) {
+          void this.solanaWs.ensureAccountSubscription(this.pinnedMint);
+        }
+      } catch (err) {
+        log.warn("Solana WSS start failed (paper continues on HTTPS)", err);
+      }
+    }
     // Backfill mint/CA on old journal rows from in-memory session fills
     // (disk trades.json already applied inside TradeJournal constructor).
     const sessionFills = this.ledger.getTrades(10_000).map((t) => t.fill);
@@ -214,6 +250,9 @@ export class BotEngine {
       pinnedSymbol: this.pinnedSymbol,
       pinnedName: this.pinnedName,
       solanaRpcConfigured: this.cfg.solanaRpcConfigured === true,
+      solanaRpcWss: this.solanaWs
+        ? this.solanaWs.getStatus()
+        : emptySolanaWsStatus(),
     };
   }
 
@@ -317,6 +356,9 @@ export class BotEngine {
     message +=
       " Bankroll, max position, daily loss, vault, chase lockout, and exit rules still apply. The coin still has to pass the momentum checks before a buy.";
     log.info("Pinned single coin", { mint: parsed.mint, openOthers: others.length });
+    if (this.solanaWs) {
+      void this.solanaWs.ensureAccountSubscription(parsed.mint);
+    }
     return {
       ok: true,
       message,
@@ -1107,6 +1149,25 @@ export class BotEngine {
       portfolio,
       fills,
     };
+  }
+
+  /**
+   * Stop the paper runner (if any) and tear down the optional WSS listener.
+   * Call on process shutdown. Does not enable live trading.
+   */
+  async dispose(): Promise<void> {
+    try {
+      await this.stop();
+    } catch (err) {
+      log.warn("dispose: runner stop failed", err);
+    }
+    if (this.solanaWs) {
+      try {
+        await this.solanaWs.stop();
+      } catch (err) {
+        log.warn("dispose: Solana WSS stop failed", err);
+      }
+    }
   }
 
   private async runLoop(signal: AbortSignal): Promise<void> {
