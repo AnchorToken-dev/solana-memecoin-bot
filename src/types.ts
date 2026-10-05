@@ -91,6 +91,11 @@ export interface BotConfig {
    */
   solanaRpcConfigured?: boolean;
   /**
+   * True when SOLANA_RPC_WSS_URL is set. URL never stored here.
+   * Optional listen-only WebSocket; paper stays HTTPS-first when unset.
+   */
+  solanaRpcWssConfigured?: boolean;
+  /**
    * Pre-buy rug filter. Default false — paper entries behave exactly as today.
    * When true and no read-only RPC is configured, that buy is skipped.
    * Optional on the type so older fixtures compile; loadConfig sets it.

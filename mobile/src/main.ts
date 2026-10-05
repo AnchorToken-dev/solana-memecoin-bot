@@ -199,6 +199,7 @@ async function paintStatus(main: Element) {
       <div class="row"><span class="k">Cycle</span><span class="v">${escapeHtml(String(status.cycle ?? 0))}</span></div>
       <div class="row"><span class="k">Source</span><span class="v">${escapeHtml(String(status.marketDataSource ?? "—"))}</span></div>
       <div class="row"><span class="k">Solana RPC</span><span class="v">${status.solanaRpcConfigured === true ? "configured (read-only)" : "not configured"}</span></div>
+      <div class="row"><span class="k">Solana WSS</span><span class="v">${formatSolanaWss(status.solanaRpcWss)}</span></div>
       <div class="row"><span class="k">Rug filter</span><span class="v">${cfg.rugFilterEnabled === true ? "on" : "off"}</span></div>
       ${pinStatusBlock(status)}
       <div class="row"><span class="k">Take-profit</span><span class="v">${tp == null ? "—" : tp <= 0 ? "off" : `+${tp}%`}</span></div>
@@ -1152,6 +1153,22 @@ async function copyText(text: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function formatSolanaWss(wss: unknown): string {
+  if (!wss || typeof wss !== "object") return "not configured";
+  const w = wss as {
+    configured?: unknown;
+    connected?: unknown;
+    state?: unknown;
+    lastSlot?: unknown;
+  };
+  if (w.configured !== true) return "not configured";
+  const state = typeof w.state === "string" ? w.state : "unknown";
+  const slot =
+    typeof w.lastSlot === "number" ? ` · slot ${w.lastSlot}` : "";
+  if (w.connected === true) return `connected (${state})${slot}`;
+  return `${state} (read-only listen)`;
 }
 
 function escapeHtml(s: string): string {
