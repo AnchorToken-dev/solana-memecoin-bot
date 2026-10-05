@@ -146,7 +146,7 @@ npm run api
 | PATCH / PUT | `/config` | **PAPER_MODE only**: update paper knobs (bankroll, max position, stops, trail, TP, momentum filters, min age, max hold, daily loss, poll). Persists `data/runtime-config.json`. **409** if runner running — stop first. Rejects `paperMode` / wallet / live fields |
 | POST | `/config/preset` | Body `{ "preset": "momentum" \| "sniper" }` — apply named preset + persist. **409** if runner running |
 | GET | `/trades?limit=50` | Recent fills (session ledger; cleared by Reset) |
-| GET | `/journal?limit=&offset=` | **Trade journal** — closed paper trades newest first with **mint/CA**, optional **checklist snapshot** (id/verdict/thesis), + **Daily/Weekly/Monthly/Overall P&L** (USD + SOL/`quoteAsset`; America/New_York periods; survives Reset) |
+| GET | `/journal?limit=&offset=` | **Trade journal** — closed paper trades newest first with **mint/CA**, optional **checklist snapshot** (id/verdict/thesis), + **Daily/Weekly/Monthly/Overall P&L** and **`charts`** (cumulative realized P&L, win rate by hour, average win vs loss; USD; America/New_York; survives Reset). Chart series use every stored row, not just the page |
 | PATCH | `/journal/:id` | Body `{ "note": "…" }` — edit learning note |
 | DELETE | `/journal` | Explicit journal clear only (Reset does **not** clear journal) |
 | GET | `/alerts?since=` | Session events for phone local notifications (start/stop/open/close/daily loss) |

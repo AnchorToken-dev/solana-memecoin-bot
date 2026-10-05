@@ -466,3 +466,86 @@ button.pin-action {
   margin: 8px 0;
 }
 .pin-status { margin: 10px 0 4px; }
+
+/* Journal tendency charts — large type, high contrast (readable without glasses). */
+.journal-charts h2 {
+  font-size: 1.45rem;
+}
+.journal-charts h3 {
+  font-size: 1.3rem;
+  margin: 18px 0 6px;
+  color: var(--text);
+}
+.journal-charts .chart-read,
+.journal-charts .chart-axis {
+  color: #f8fafc;
+  font-size: 1.15rem;
+  font-weight: 650;
+  line-height: 1.35;
+  margin: 6px 0;
+}
+.journal-charts .chart-stat-label {
+  color: #f8fafc;
+  font-size: 1.2rem;
+  font-weight: 800;
+}
+.journal-charts .chart-stat-value {
+  font-size: 2.1rem;
+  font-weight: 800;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.journal-charts .compare-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 8px;
+}
+.journal-canvas {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  background: #020617;
+  border: 2px solid #e2e8f0;
+  border-radius: 12px;
+}
+.hour-list { margin-top: 8px; }
+.hour-row {
+  display: grid;
+  grid-template-columns: 5.2rem 1fr 4.6rem;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+.hour-label,
+.hour-pct {
+  font-size: 1.35rem;
+  font-weight: 800;
+  color: #f8fafc;
+  font-variant-numeric: tabular-nums;
+}
+.hour-pct { text-align: right; }
+.hour-pct.win { color: var(--accent); }
+.hour-pct.loss { color: var(--danger); }
+.hour-track {
+  display: block;
+  height: 28px;
+  background: #1e293b;
+  border: 2px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.hour-fill {
+  display: block;
+  height: 100%;
+  min-width: 8px;
+}
+.hour-fill.win { background: var(--accent); }
+.hour-fill.loss { background: var(--danger); }
+.hour-sub {
+  color: #f8fafc;
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin: 2px 0 4px 5.6rem;
+}

@@ -25,6 +25,7 @@ import {
   startOfMonth,
   startOfWeekMonday,
 } from "./timezone.js";
+import { computeJournalCharts, type JournalCharts } from "./charts.js";
 
 /** Default chain quote asset for Solana paper bot (multi-chain later). */
 export const DEFAULT_QUOTE_ASSET = "SOL";
@@ -127,6 +128,11 @@ export interface JournalListResult {
   limit: number;
   offset: number;
   summary: JournalSummary;
+  /**
+   * Tendencies from every stored row (not just this page).
+   * Read-only; pagination does not drop older closes from the charts.
+   */
+  charts: JournalCharts;
 }
 
 /** Minimal fill shape for mint backfill (session ledger / trades.json). */
@@ -482,12 +488,16 @@ export class TradeJournal {
       timeZone: opts?.timeZone,
       estimateQuoteUsdRate: opts?.estimateQuoteUsdRate,
     });
+    const charts = computeJournalCharts(this.entries, {
+      timeZone: opts?.timeZone,
+    });
     return {
       entries: newestFirst.slice(offset, offset + limit),
       total,
       limit,
       offset,
       summary,
+      charts,
     };
   }
 

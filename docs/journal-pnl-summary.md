@@ -61,3 +61,16 @@ UI and API use **`quoteAsset`** / **`chainId`** rather than hard-coding â€œSOLâ€
 ```
 
 Existing CA / DexScreener / notes / clear behavior is unchanged. PATCH note and DELETE clear still work as before.
+
+
+## Tendency charts
+
+`GET /journal` also includes `charts`, computed from **every stored closed row** (pagination does not drop older closes). Nothing new is collected, and trading logic is unchanged.
+
+The journal does not store account equity. `charts.equity` is cumulative realized P&L in USD (`equityBasis: "cumulative_realized_pnl_usd"`), oldest close first, with a flat 0 at the first open when that open is earlier than the close.
+
+`charts.winRateByHour` is win rate by **close hour** in `charts.timezone` (default America/New_York). A win is `pnlUsd > 0`, a loss is `pnlUsd < 0`, same as period `winPct`. Hours with no decided closes are listed in `skippedHours` and are **not** given a 0% point. Breakeven closes are not in the rate.
+
+`charts.winLoss` is average win and average loss in USD. A missing side is `null`, not `$0`. `payoffRatio` is average win divided by the absolute average loss, or `null` when either side is missing.
+
+The mobile Journal tab draws these with canvas (equity line, average win vs loss bars) and large-type hour bars. No chart library was added. Seeing them on a running bot means pulling this code and restarting the API yourself, then rebuilding the phone UI if it is an installed APK. This change does not restart anything.

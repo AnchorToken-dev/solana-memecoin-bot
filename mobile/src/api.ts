@@ -1,4 +1,5 @@
 import { getApiBaseUrl } from "./settings";
+import type { JournalChartsPayload } from "./journalCharts";
 
 export class ApiError extends Error {
   constructor(
@@ -235,6 +236,8 @@ export const api = {
           quoteBasis: string;
         }>;
       };
+      /** Full-journal tendencies. Missing on an API that has not been restarted. */
+      charts?: JournalChartsPayload;
     }>(`/journal?limit=${limit}&offset=${offset}`),
   updateJournalNote: (id: string, note: string) =>
     request<{ ok: boolean; entry: { id: string; note: string }; message?: string }>(
