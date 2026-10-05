@@ -8,6 +8,7 @@ import {
   onStartRequestAlerts,
   ensureAlertPermission,
 } from "./alerts";
+import { journalChartsHtml, mountJournalCharts } from "./journalCharts";
 
 type Tab = "status" | "control" | "bankroll" | "checklist" | "journal" | "settings";
 
@@ -734,8 +735,10 @@ async function paintJournal(main: Element) {
       </div>
     </div>`
       : "";
+  const chartsCard = journalChartsHtml(data.charts);
   main.innerHTML = `
     ${summaryCard}
+    ${chartsCard}
     <div class="card">
       <h2>Trade journal</h2>
       <p class="muted">Closed paper trades with notes + mint/CA. Survives session <strong>Reset</strong> — clear only via button below. Same-named coins are distinguished by CA; open DexScreener from each row. When a research checklist existed for the mint at close, a GO / NO-GO badge links the trade to that research. PnL shown in USD + ${escapeHtml(quoteAsset)}.</p>
@@ -810,6 +813,7 @@ async function paintJournal(main: Element) {
         <button class="danger" id="clearJournal" ${busy || entries.length===0 ? "disabled" : ""}>Clear journal</button>
       </div>
     </div>`;
+  mountJournalCharts(main, data.charts);
   main.querySelector("#refresh")?.addEventListener("click", () => void render());
   main.querySelector("#clearJournal")?.addEventListener("click", () => {
     const ok = window.confirm(

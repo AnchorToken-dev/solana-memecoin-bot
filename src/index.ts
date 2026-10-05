@@ -46,7 +46,7 @@ async function main(): Promise<void> {
   Reset:     POST http://127.0.0.1:${port}/runner/reset  (PAPER: clear ledger / daily-loss lock)
   Portfolio: http://127.0.0.1:${port}/portfolio
   Trades:    http://127.0.0.1:${port}/trades
-  Journal:   http://127.0.0.1:${port}/journal  (P&L summary + USD/SOL; survives reset; PATCH note)
+  Journal:   http://127.0.0.1:${port}/journal  (P&L summary + charts + USD/SOL; survives reset; PATCH note)
   Checklist: http://127.0.0.1:${port}/checklist  (research GO/NO-GO; POST create)
   Alerts:    http://127.0.0.1:${port}/alerts?since=0  (session events for phone notifications)
   Config:    http://127.0.0.1:${port}/config
