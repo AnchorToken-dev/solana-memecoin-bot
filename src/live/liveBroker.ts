@@ -19,6 +19,13 @@ import { signTransaction, txSignature } from "./tx.js";
 import { computeOnChainDelta, LAMPORTS_PER_SOL } from "./fills.js";
 import { redactSecrets } from "./redact.js";
 import { sellSlippageLadder, type LiveSettings } from "./mode.js";
+import {
+  computeBuyCosts,
+  computeSellCosts,
+  exitLiquidityUsd,
+  type PaperFeeSettings,
+  type PaperVenue,
+} from "../broker/paperFees.js";
 
 export type LiveExecMode = "live_dry_run" | "live";
 
@@ -34,12 +41,33 @@ type SendOutcome =
   | { ok: true; signature: string }
   | { ok: false; reason: string; signature?: string; unconfirmed?: boolean };
 
+/**
+ * Cost model for LIVE DRY-RUN estimates (nothing hits the chain, so costs are
+ * estimated). Same itemised model as paper mode (src/broker/paperFees.ts).
+ * Absent, or fees.model === "legacy" (PAPER_FEE_MODEL=legacy) → the old
+ * PumpPortal 0.5% + priority-fee estimate. Real live mode never uses this:
+ * it reads the actual SOL/token deltas from the confirmed transaction.
+ */
+export interface DryRunCostModel {
+  fees?: PaperFeeSettings | null;
+  /** SLIPPAGE_BPS fallback when pool liquidity is unknown (same as paper). */
+  flatSlippageBps: number;
+}
+
+/** Dry-run cost model from bot config: paper fee settings + SLIPPAGE_BPS fallback. */
+export function dryRunCostModelFromConfig(cfg: {
+  paperBroker: { slippageBps: number; fees?: PaperFeeSettings };
+}): DryRunCostModel {
+  return { fees: cfg.paperBroker.fees ?? null, flatSlippageBps: cfg.paperBroker.slippageBps };
+}
+
 export interface LiveBrokerDeps {
   signer: LiveSigner;
   rpc: LiveRpc;
   builder: SwapTxBuilder;
   settings: LiveSettings;
   mode: LiveExecMode;
+  dryRunCosts?: DryRunCostModel;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
 }
@@ -55,6 +83,14 @@ export class LiveBroker {
     this.mode = d.mode;
     this.sleep = d.sleep ?? defaultSleep;
     this.now = d.now ?? Date.now;
+  }
+
+  /** Realistic dry-run cost settings, or null → legacy estimate. */
+  private dryRunFees(prioritySol: number): { fees: PaperFeeSettings; flatSlippageBps: number } | null {
+    const m = this.d.dryRunCosts;
+    if (!m?.fees || m.fees.model !== "realistic") return null;
+    // Network fee uses the priority fee this tx was actually built with.
+    return { fees: { ...m.fees, priorityFeeSol: prioritySol }, flatSlippageBps: m.flatSlippageBps };
   }
 
   get publicKey(): string {
@@ -129,7 +165,16 @@ export class LiveBroker {
     return null;
   }
 
-  async buy(args: { mint: string; symbol: string; markPrice: number; notionalUsd: number; solUsd: number }): Promise<BuyResult> {
+  async buy(args: {
+    mint: string;
+    symbol: string;
+    markPrice: number;
+    notionalUsd: number;
+    solUsd: number;
+    /** Dry-run cost model only: where the coin trades + pool liquidity (USD). */
+    venue?: PaperVenue;
+    liquidityUsd?: number;
+  }): Promise<BuyResult> {
     const s = this.d.settings;
     const notionalUsd = Math.min(args.notionalUsd, s.maxPositionUsd);
     if (!(args.solUsd > 0)) return { ok: false, reason: "no SOL/USD rate — cannot size a live buy" };
@@ -145,6 +190,7 @@ export class LiveBroker {
     if (balance < needed) {
       return { ok: false, reason: `insufficient SOL: have ${balance.toFixed(4)}, need ${needed.toFixed(4)} (incl. reserve ${s.minSolReserve})` };
     }
+    const buyPrio = Math.min(s.priorityFeeSol, s.priorityFeeMaxSol);
     const out = await this.execute({
       publicKey: this.d.signer.publicKey,
       action: "buy",
@@ -152,7 +198,7 @@ export class LiveBroker {
       amount: solAmount,
       denominatedInSol: true,
       slippageBps: s.slippageBps,
-      priorityFeeSol: Math.min(s.priorityFeeSol, s.priorityFeeMaxSol),
+      priorityFeeSol: buyPrio,
       pool: s.pool,
     });
     if (!out.ok) return out;
@@ -162,8 +208,29 @@ export class LiveBroker {
     let qty: number;
     let spentUsd: number;
     let feesUsd: number;
-    if (out.simulated) {
-      // Dry-run: nothing hit the chain. Estimate like paper (PumpPortal 0.5% + slippage guess).
+    let slippageUsd: number | null = null;
+    let breakdown: Fill["feeBreakdown"];
+    const realistic = out.simulated ? this.dryRunFees(buyPrio) : null;
+    if (out.simulated && realistic) {
+      // Dry-run, realistic (same model as paper): the trade size leaves the
+      // wallet; pump.fun/PumpSwap + PumpPortal + network fees + token-account
+      // rent come out of it; the rest buys at the size-aware slipped price.
+      const c = computeBuyCosts(realistic.fees, {
+        notionalUsd,
+        markPrice: args.markPrice,
+        solUsd: args.solUsd,
+        venue: args.venue,
+        liquidityUsd: args.liquidityUsd,
+        flatSlippageBps: realistic.flatSlippageBps,
+      });
+      qty = c.qty;
+      spentUsd = notionalUsd;
+      feesUsd = c.breakdown.totalFeesUsd;
+      slippageUsd = c.breakdown.slippageUsd;
+      breakdown = c.breakdown;
+      if (!(qty > 0)) return { ok: false, reason: "dry-run: costs exceed trade size" };
+    } else if (out.simulated) {
+      // Dry-run, legacy (PAPER_FEE_MODEL=legacy): PumpPortal 0.5% + priority fee only.
       feesUsd = notionalUsd * 0.005 + s.priorityFeeSol * args.solUsd;
       spentUsd = notionalUsd + s.priorityFeeSol * args.solUsd;
       qty = (notionalUsd * 0.995) / args.markPrice;
@@ -192,11 +259,12 @@ export class LiveBroker {
       price,
       notionalUsd: spentUsd,
       feesUsd,
-      slippageUsd: Math.max(0, spentUsd - qty * args.markPrice - feesUsd),
+      slippageUsd: slippageUsd ?? Math.max(0, spentUsd - qty * args.markPrice - feesUsd),
       timestamp: now,
       paper: false,
       mode: this.mode,
       signature: out.simulated ? null : out.signature,
+      ...(breakdown ? { feeBreakdown: breakdown } : {}),
     };
     const position: Position = {
       id: positionId,
@@ -210,6 +278,10 @@ export class LiveBroker {
       highWaterPrice: price,
       trailArmed: false,
       openedAt: now,
+      ...(breakdown ? { venue: breakdown.venue, entryFeeBreakdown: breakdown } : {}),
+      ...(breakdown && typeof args.liquidityUsd === "number" && args.liquidityUsd > 0
+        ? { entryLiquidityUsd: args.liquidityUsd }
+        : {}),
     };
     return { ok: true, fill, position, signature: fill.signature ?? null, simulated: !!out.simulated };
   }
@@ -239,8 +311,31 @@ export class LiveBroker {
       }
       let proceedsUsd: number;
       let feesUsd: number;
+      let slippageUsd: number | null = null;
+      let breakdown: Fill["feeBreakdown"];
       const simulated = !out.ok || !!out.simulated;
-      if (simulated) {
+      const realistic = simulated ? this.dryRunFees(prio) : null;
+      if (simulated && realistic) {
+        // Dry-run, realistic (same model as paper): size-aware exit slippage,
+        // then pump.fun/PumpSwap + PumpPortal + network fees off the SOL received.
+        // Pool liquidity at exit ≈ entry liquidity × √(price move), measured from
+        // the slipped fill price like paper (entryPrice here includes fees, so back them out).
+        const entryFill = args.position.entryFeeBreakdown
+          ? entryFillPrice(args.position)
+          : args.position.entryPrice;
+        const c = computeSellCosts(realistic.fees, {
+          qty: args.position.qty,
+          markPrice: args.markPrice,
+          solUsd: args.solUsd,
+          venue: args.position.venue,
+          liquidityUsd: exitLiquidityUsd(args.position.entryLiquidityUsd, entryFill, args.markPrice),
+          flatSlippageBps: realistic.flatSlippageBps,
+        });
+        proceedsUsd = c.proceedsUsd;
+        feesUsd = c.breakdown.totalFeesUsd;
+        slippageUsd = c.breakdown.slippageUsd;
+        breakdown = c.breakdown;
+      } else if (simulated) {
         const gross = args.position.qty * args.markPrice;
         feesUsd = gross * 0.005 + prio * args.solUsd;
         proceedsUsd = gross - feesUsd;
@@ -267,12 +362,13 @@ export class LiveBroker {
         price: args.position.qty > 0 ? proceedsUsd / args.position.qty : 0,
         notionalUsd: proceedsUsd,
         feesUsd,
-        slippageUsd: Math.max(0, args.position.qty * args.markPrice - proceedsUsd - feesUsd),
+        slippageUsd: slippageUsd ?? Math.max(0, args.position.qty * args.markPrice - proceedsUsd - feesUsd),
         reason: args.reason,
         timestamp: this.now(),
         paper: false,
         mode: this.mode,
         signature: out.ok && !simulated ? out.signature : null,
+        ...(breakdown ? { feeBreakdown: breakdown } : {}),
       };
       return {
         ok: true,
@@ -287,4 +383,16 @@ export class LiveBroker {
     }
     return { ok: false, reason: errors[errors.length - 1] ?? "sell failed", attempts: errors.length, errors };
   }
+}
+
+/**
+ * Paper-model fill price for a realistic dry-run position. entryPrice is the
+ * all-in cost per token (trade size ÷ tokens, like live); the paper model's
+ * slipped fill price is that with the fees taken back out.
+ */
+function entryFillPrice(p: Position): number {
+  const bd = p.entryFeeBreakdown!;
+  if (!(p.qty > 0)) return p.entryPrice;
+  const fill = Math.max(0, p.entryNotionalUsd - bd.totalFeesUsd) / p.qty;
+  return fill > 0 ? fill : p.entryPrice;
 }

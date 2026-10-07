@@ -60,7 +60,7 @@ import {
   exitTitle,
 } from "../alerts/sessionEvents.js";
 import { modeLabel, type TradingMode, type LiveSettings } from "../live/mode.js";
-import { LiveBroker } from "../live/liveBroker.js";
+import { dryRunCostModelFromConfig, LiveBroker } from "../live/liveBroker.js";
 import { loadLiveSigner } from "../live/keypair.js";
 import { HttpsLiveRpc } from "../live/rpc.js";
 import { PumpPortalBuilder } from "../live/pumpportal.js";
@@ -572,6 +572,8 @@ export class BotEngine {
       builder: new PumpPortalBuilder(),
       settings: live,
       mode: this.tradingMode === "live" ? "live" : "live_dry_run",
+      // Dry-run estimates use the paper cost model (PAPER_FEE_MODEL=legacy → old estimate).
+      dryRunCosts: dryRunCostModelFromConfig(this.cfg),
     });
     const v = this.setupVault(signer.signer, rpc, process.env);
     if (!v.ok) {
@@ -1970,12 +1972,16 @@ export class BotEngine {
         log.warn(`Skip LIVE entry ${entry.symbol}: no SOL/USD rate`);
         return false;
       }
+      const liveSnap = snaps.find((s) => s.mint === entry.mint);
       const res = await this.liveBroker.buy({
         mint: entry.mint,
         symbol: entry.symbol,
         markPrice: entry.priceUsd,
         notionalUsd: Math.min(sized.notionalUsd, cfg.live.maxPositionUsd),
         solUsd,
+        // Dry-run cost estimate only (venue fee tier + size-aware slippage); live ignores these.
+        ...(liveSnap?.venue ? { venue: liveSnap.venue } : {}),
+        ...(liveSnap && liveSnap.liquidityUsd > 0 ? { liquidityUsd: liveSnap.liquidityUsd } : {}),
       });
       if (!res.ok) {
         // No position recorded → no ghost. Loud only when the chain state is unknown.

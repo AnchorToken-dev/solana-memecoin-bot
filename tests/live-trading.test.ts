@@ -14,7 +14,9 @@ import { applyTradingModeGates, assertPaperOrStubLive } from "../src/config.js";
 import { loadLiveSigner, permsTooOpen, type LiveSigner } from "../src/live/keypair.js";
 import { parseTransaction, signTransaction, txSignature } from "../src/live/tx.js";
 import { redactSecrets } from "../src/live/redact.js";
-import { LiveBroker } from "../src/live/liveBroker.js";
+import { LiveBroker, dryRunCostModelFromConfig, type DryRunCostModel } from "../src/live/liveBroker.js";
+import { PaperBroker } from "../src/broker/paper.js";
+import { PAPER_FEE_DEFAULTS, computeBuyCosts, loadPaperFeeSettings, type PaperFeeSettings } from "../src/broker/paperFees.js";
 import type { LiveRpc, TxMeta } from "../src/live/rpc.js";
 import type { SwapRequest, SwapTxBuilder } from "../src/live/pumpportal.js";
 import { PumpPortalBuilder } from "../src/live/pumpportal.js";
@@ -230,12 +232,13 @@ function sellMeta(): TxMeta {
   };
 }
 
-function mkBroker(rpc: MockRpc, mode: "live" | "live_dry_run" = "live", env: Record<string, string> = {}) {
+function mkBroker(rpc: MockRpc, mode: "live" | "live_dry_run" = "live", env: Record<string, string> = {}, dryRunCosts?: DryRunCostModel) {
   const builder = new MockBuilder(() => signer.publicKeyBytes);
   const settings = loadLiveSettings({ LIVE_CONFIRM_TIMEOUT_MS: "5000", ...env });
   let t = 0;
   const broker = new LiveBroker({
     signer, rpc, builder, settings, mode,
+    ...(dryRunCosts ? { dryRunCosts } : {}),
     sleep: async (ms) => { t += ms; },
     now: () => t,
   });
@@ -572,5 +575,221 @@ describe("trade-size hot buttons", () => {
     } finally {
       rmSync(d, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------- LIVE DRY-RUN uses the paper cost model ----------
+describe("LIVE DRY-RUN realistic costs (same model as paper)", () => {
+  const SOL = 150;
+  const FEES: PaperFeeSettings = { ...PAPER_FEE_DEFAULTS };
+  const COSTS: DryRunCostModel = { fees: FEES, flatSlippageBps: 50 };
+  const near = (a: number, b: number, eps = 1e-6) => assert.ok(Math.abs(a - b) <= eps, `expected ${a} ≈ ${b} (±${eps})`);
+  const buy15 = { mint: MINT, symbol: "TST", markPrice: 0.00003, notionalUsd: 15, solUsd: SOL };
+
+  function paperCfg(fees: PaperFeeSettings | undefined, slippageBps = 50): BotConfig {
+    return { ...liveCfg("/tmp/unused"), paperMode: true, tradingMode: undefined, live: undefined, paperBroker: { slippageBps, feeBps: 30, ...(fees ? { fees } : {}) } } as unknown as BotConfig;
+  }
+
+  it("buy charges pump.fun 1.25% + PumpPortal 0.5% + network + rent, records breakdown, never sends", async () => {
+    const rpc = new MockRpc({ meta: buyMeta });
+    const { broker } = mkBroker(rpc, "live_dry_run", {}, COSTS);
+    const r = await broker.buy({ ...buy15, venue: "bonding_curve", liquidityUsd: 30_000 });
+    assert.ok(r.ok);
+    assert.equal(rpc.sends, 0);
+    const bd = r.fill.feeBreakdown!;
+    assert.ok(bd, "fill carries fee breakdown");
+    assert.equal(bd.venue, "bonding_curve");
+    assert.equal(bd.venueFeeBps, 125);
+    near(bd.venueFeeUsd, 15 * 0.0125);
+    near(bd.pumpPortalFeeUsd, 15 * 0.005);
+    near(bd.networkFeeUsd, (0.000005 + 0.0002) * SOL);
+    near(bd.rentUsd, 0.00148844 * SOL);
+    near(r.fill.feesUsd, bd.totalFeesUsd);
+    // Size-aware slippage: 25 bps base + 15/30k = 5 bps → 30 bps.
+    near(bd.slippageBps, 30, 1e-9);
+    // All-in: the trade size leaves the wallet (like paper), fees come out of it.
+    near(r.fill.notionalUsd, 15);
+    near(r.position.entryNotionalUsd, 15);
+    const expectQty = (15 - bd.totalFeesUsd) / (0.00003 * 1.003);
+    near(r.position.qty, expectQty, 1e-3);
+    // Position remembers venue + liquidity + breakdown for the exit and the journal.
+    assert.equal(r.position.venue, "bonding_curve");
+    assert.equal(r.position.entryLiquidityUsd, 30_000);
+    assert.deepEqual(r.position.entryFeeBreakdown, bd);
+  });
+
+  it("$15 flat round trip costs the same as paper", async () => {
+    const rpc = new MockRpc({ meta: buyMeta });
+    const { broker } = mkBroker(rpc, "live_dry_run", {}, COSTS);
+    const b = await broker.buy({ ...buy15, venue: "bonding_curve", liquidityUsd: 30_000 });
+    assert.ok(b.ok);
+    const s = await broker.sell({ position: b.position, markPrice: 0.00003, reason: "time_stop", solUsd: SOL });
+    assert.ok(s.ok);
+    assert.equal(rpc.sends, 0);
+    assert.ok(s.fill.feeBreakdown, "sell fill carries fee breakdown");
+    assert.equal(s.fill.feeBreakdown!.rentUsd, 0);
+
+    const paper = new PaperBroker(paperCfg(FEES));
+    const pb = paper.applyBuy({ mint: MINT, symbol: "TST", markPrice: 0.00003, notionalUsd: 15, solUsd: SOL, venue: "bonding_curve", liquidityUsd: 30_000 });
+    const ps = paper.applySell({ position: pb.position, markPrice: 0.00003, reason: "time_stop", solUsd: SOL });
+    near(s.realizedPnlUsd, ps.realizedPnlUsd, 1e-6);
+    near(b.fill.feesUsd + s.fill.feesUsd, pb.fill.feesUsd + ps.fill.feesUsd, 1e-6);
+    // @ $150 SOL: buy 0.1875 + 0.075 + 0.03075 + 0.22327 rent; sell ≈ 0.1803 + 0.0721 + 0.03075.
+    near(b.fill.feesUsd + s.fill.feesUsd, 0.7995, 0.005);
+    // Plus 30 bps slippage each side → ≈ $0.89 all-in on a flat $15 trade.
+    assert.ok(s.realizedPnlUsd < -0.85 && s.realizedPnlUsd > -0.92, `round trip ${s.realizedPnlUsd}`);
+  });
+
+  it("is materially more conservative than the old dry-run estimate", async () => {
+    const rt = async (costs?: DryRunCostModel) => {
+      const rpc = new MockRpc({ meta: buyMeta });
+      const { broker } = mkBroker(rpc, "live_dry_run", {}, costs);
+      const b = await broker.buy({ ...buy15, venue: "bonding_curve", liquidityUsd: 30_000 });
+      assert.ok(b.ok);
+      const s = await broker.sell({ position: b.position, markPrice: 0.00003, reason: "time_stop", solUsd: SOL });
+      assert.ok(s.ok);
+      return s.realizedPnlUsd;
+    };
+    const legacy = await rt(undefined);
+    const realistic = await rt(COSTS);
+    const diff = legacy - realistic;
+    // Old estimate ≈ $0.21 on a flat $15 trade @ $150 SOL; realistic ≈ $0.89.
+    assert.ok(diff > 0.6 && diff < 0.75, `difference ${diff}`);
+  });
+
+  it("graduated coin (PumpSwap) uses the market-cap fee tier, same as paper", async () => {
+    const rpc = new MockRpc({ meta: buyMeta });
+    const { broker } = mkBroker(rpc, "live_dry_run", {}, COSTS);
+    // mcap = 0.0003 × 1B = $300k → 2,000 SOL @ $150 → tier 115 bps.
+    const r = await broker.buy({ ...buy15, markPrice: 0.0003, venue: "pumpswap", liquidityUsd: 80_000 });
+    assert.ok(r.ok);
+    assert.equal(r.fill.feeBreakdown!.venue, "pumpswap");
+    assert.equal(r.fill.feeBreakdown!.venueFeeBps, 115);
+    const s = await broker.sell({ position: r.position, markPrice: 0.0003, reason: "time_stop", solUsd: SOL });
+    assert.ok(s.ok);
+    assert.equal(s.fill.feeBreakdown!.venue, "pumpswap");
+    assert.equal(s.fill.feeBreakdown!.venueFeeBps, 115);
+  });
+
+  it("thin pools slip more (capped at 3%/side); unknown liquidity falls back to SLIPPAGE_BPS", async () => {
+    const rpc = new MockRpc({ meta: buyMeta });
+    const { broker } = mkBroker(rpc, "live_dry_run", {}, COSTS);
+    const thin = await broker.buy({ ...buy15, liquidityUsd: 300 });
+    assert.ok(thin.ok);
+    assert.equal(thin.fill.feeBreakdown!.slippageBps, 300);
+    const unknown = await broker.buy({ ...buy15 });
+    assert.ok(unknown.ok);
+    assert.equal(unknown.fill.feeBreakdown!.slippageBps, 50);
+    assert.equal(unknown.fill.feeBreakdown!.venue, "bonding_curve");
+    assert.equal(unknown.position.entryLiquidityUsd, undefined);
+  });
+
+  it("exit slippage tracks pool size at exit like paper (√ price move)", async () => {
+    const rpc = new MockRpc({ meta: buyMeta });
+    const { broker } = mkBroker(rpc, "live_dry_run", {}, COSTS);
+    const b = await broker.buy({ ...buy15, liquidityUsd: 20_000 });
+    assert.ok(b.ok);
+    const s = await broker.sell({ position: b.position, markPrice: 0.00012, reason: "take_profit", solUsd: SOL });
+    assert.ok(s.ok);
+    const paper = new PaperBroker(paperCfg(FEES));
+    const pb = paper.applyBuy({ mint: MINT, symbol: "TST", markPrice: 0.00003, notionalUsd: 15, solUsd: SOL, liquidityUsd: 20_000 });
+    const ps = paper.applySell({ position: pb.position, markPrice: 0.00012, reason: "take_profit", solUsd: SOL });
+    near(s.fill.feeBreakdown!.slippageBps, ps.fill.feeBreakdown!.slippageBps, 0.01);
+    near(s.realizedPnlUsd, ps.realizedPnlUsd, 1e-6);
+  });
+
+  it("network fee uses the priority fee the tx was built with", async () => {
+    const rpc = new MockRpc({ meta: buyMeta });
+    const { broker } = mkBroker(rpc, "live_dry_run", { LIVE_PRIORITY_FEE_SOL: "0.0005" }, COSTS);
+    const r = await broker.buy(buy15);
+    assert.ok(r.ok);
+    near(r.fill.feeBreakdown!.networkFeeUsd, (0.000005 + 0.0005) * SOL);
+  });
+
+  it("PAPER_FEE_MODEL=legacy → old dry-run estimate exactly (no breakdown)", async () => {
+    const legacyFees = loadPaperFeeSettings({ PAPER_FEE_MODEL: "legacy" });
+    for (const costs of [{ fees: legacyFees, flatSlippageBps: 50 }, undefined, { fees: null, flatSlippageBps: 50 }]) {
+      const rpc = new MockRpc({ meta: buyMeta });
+      const { broker } = mkBroker(rpc, "live_dry_run", {}, costs);
+      const r = await broker.buy({ ...buy15, venue: "pumpswap", liquidityUsd: 1000 });
+      assert.ok(r.ok);
+      near(r.fill.feesUsd, 15 * 0.005 + 0.0002 * SOL);
+      near(r.fill.notionalUsd, 15 + 0.0002 * SOL);
+      near(r.position.qty, (15 * 0.995) / 0.00003, 1e-3);
+      assert.equal(r.fill.feeBreakdown, undefined);
+      assert.equal(r.position.entryFeeBreakdown, undefined);
+      const s = await broker.sell({ position: r.position, markPrice: 0.00003, reason: "time_stop", solUsd: SOL });
+      assert.ok(s.ok);
+      const gross = r.position.qty * 0.00003;
+      near(s.fill.feesUsd, gross * 0.005 + 0.0002 * SOL);
+      near(s.proceedsUsd, gross - (gross * 0.005 + 0.0002 * SOL));
+      assert.equal(s.fill.feeBreakdown, undefined);
+    }
+  });
+
+  it("real LIVE mode ignores the cost model: P&L still comes from the on-chain wallet delta", async () => {
+    const run = async (costs?: DryRunCostModel) => {
+      const rpc = new MockRpc({ meta: buyMeta });
+      const { broker } = mkBroker(rpc, "live", { LIVE_MAX_POSITION_USD: "15" }, costs);
+      const b = await broker.buy({ ...buy15, notionalUsd: 100, solUsd: 118, venue: "pumpswap", liquidityUsd: 500 });
+      assert.ok(b.ok);
+      rpc.kind = "sell";
+      const s = await broker.sell({ position: b.position, markPrice: 0.00003, reason: "stop_loss", solUsd: 118 });
+      assert.ok(s.ok);
+      return { b, s, sends: rpc.sends };
+    };
+    const without = await run(undefined);
+    const withCosts = await run(COSTS);
+    assert.equal(withCosts.sends, 2);
+    near(withCosts.b.fill.notionalUsd, 0.127 * 118, 1e-9);
+    assert.equal(withCosts.b.fill.qty, 500000);
+    for (const k of ["notionalUsd", "feesUsd", "slippageUsd", "price", "qty"] as const) {
+      assert.equal(withCosts.b.fill[k], without.b.fill[k], `buy ${k}`);
+      assert.equal(withCosts.s.fill[k], without.s.fill[k], `sell ${k}`);
+    }
+    assert.equal(withCosts.s.realizedPnlUsd, without.s.realizedPnlUsd);
+    assert.equal(withCosts.s.proceedsUsd, without.s.proceedsUsd);
+    assert.equal(withCosts.b.fill.feeBreakdown, undefined);
+    assert.equal(withCosts.s.fill.feeBreakdown, undefined);
+    assert.equal(withCosts.b.position.entryFeeBreakdown, undefined);
+  });
+
+  it("engine wiring: config → dry-run cost model (realistic by default, legacy honoured)", () => {
+    const real = dryRunCostModelFromConfig({ paperBroker: { slippageBps: 50, fees: loadPaperFeeSettings({}) } });
+    assert.equal(real.fees!.model, "realistic");
+    assert.equal(real.flatSlippageBps, 50);
+    const legacy = dryRunCostModelFromConfig({ paperBroker: { slippageBps: 80, fees: loadPaperFeeSettings({ PAPER_FEE_MODEL: "legacy" }) } });
+    assert.equal(legacy.fees!.model, "legacy");
+    assert.equal(dryRunCostModelFromConfig({ paperBroker: { slippageBps: 50 } }).fees, null);
+  });
+
+  it("journal row for a dry-run close carries the itemised entry + exit costs", async () => {
+    const jd = mkdtempSync(join(tmpdir(), "jr-dry-"));
+    try {
+      const rpc = new MockRpc({ meta: buyMeta });
+      const { broker } = mkBroker(rpc, "live_dry_run", {}, COSTS);
+      const b = await broker.buy({ ...buy15, liquidityUsd: 30_000 });
+      assert.ok(b.ok);
+      const s = await broker.sell({ position: b.position, markPrice: 0.000033, reason: "take_profit", solUsd: SOL });
+      assert.ok(s.ok);
+      const j = new TradeJournal(jd);
+      const row = j.appendClose({ position: b.position, exitPrice: s.fill.price, pnlUsd: s.realizedPnlUsd, exitReason: "take_profit", fillId: s.fill.id, mode: "live_dry_run", exitFill: s.fill });
+      assert.equal(row.mode, "live_dry_run");
+      assert.ok(row.feeBreakdown?.entry && row.feeBreakdown?.exit);
+      near(row.feeBreakdown!.entry!.rentUsd, 0.00148844 * SOL);
+      near(row.feesUsd!, b.fill.feesUsd + s.fill.feesUsd, 1e-5);
+    } finally {
+      rmSync(jd, { recursive: true, force: true });
+    }
+  });
+
+  it("buy computation matches computeBuyCosts with the live priority fee", async () => {
+    const rpc = new MockRpc({ meta: buyMeta });
+    const { broker, settings } = mkBroker(rpc, "live_dry_run", {}, COSTS);
+    const r = await broker.buy({ ...buy15, liquidityUsd: 50_000 });
+    assert.ok(r.ok);
+    const c = computeBuyCosts({ ...FEES, priorityFeeSol: settings.priorityFeeSol }, { notionalUsd: 15, markPrice: 0.00003, solUsd: SOL, liquidityUsd: 50_000, flatSlippageBps: 50 });
+    near(r.position.qty, c.qty, 1e-6);
+    assert.deepEqual(r.fill.feeBreakdown, c.breakdown);
   });
 });

@@ -23,7 +23,7 @@ The bot then:
 1. checks the fee payer is the bot wallet and that it is the only signer (refuses otherwise),
 2. signs locally (node:crypto ed25519; no extra npm deps),
 3. `simulateTransaction` (sigVerify on); a failed simulation is never sent,
-4. dry-run stops here; live calls `sendTransaction` over `SOLANA_RPC_URL`,
+4. dry-run stops here (costs are **estimated** — see "Dry-run costs" below); live calls `sendTransaction` over `SOLANA_RPC_URL`,
 5. polls `getSignatureStatuses` over HTTPS until `confirmed` (timeout `LIVE_CONFIRM_TIMEOUT_MS`),
 6. reads `getTransaction` and records the **real** SOL spent/received (network +
    priority fee included) and the real token amount.
@@ -35,6 +35,34 @@ can't route pre-graduation bonding-curve coins, which is most of what the sniper
 preset buys. Hand-building pump.fun program instructions is more code and breaks
 whenever pump.fun changes accounts (it has changed its fee accounts several times).
 Cost: PumpPortal takes **0.5%** per trade.
+
+## Dry-run costs (same model as paper)
+
+Nothing is sent in dry-run, so its P&L is an estimate. It uses the **same
+itemised cost model as paper mode** (`src/broker/paperFees.ts`,
+[paper-fees.md](paper-fees.md)) so practice results are as honest as paper:
+
+- pump.fun bonding-curve fee 1.25% per side, or the PumpSwap market-cap tier for
+  graduated coins (same `complete` / dexId detection as paper),
+- PumpPortal 0.5% per side,
+- network base fee + the **priority fee the tx was actually built with**
+  (`LIVE_PRIORITY_FEE_SOL`),
+- token-account rent (0.00148844 SOL) on each buy,
+- size-aware slippage on the fill price (0.25% + size ÷ pool liquidity, max 3% per side;
+  `SLIPPAGE_BPS` when liquidity is unknown).
+
+Each dry-run buy/sell fill and journal row carries the same `feeBreakdown` as
+paper. A flat $15 round trip costs ≈ $0.74 in fees + ≈ $0.09–0.16 slippage at
+SOL ≈ $116 (the old dry-run estimate charged only ≈ $0.20). `PAPER_FEE_MODEL=legacy`
+restores the old dry-run estimate (PumpPortal 0.5% + priority fee).
+
+Entry price in dry-run is the all-in cost per token (trade size ÷ tokens), the
+same way real live computes it from the wallet delta, so take-profit / stop-loss
+trigger the same way they would live.
+
+**Real live mode is unaffected:** its P&L is the actual SOL that left / entered
+the wallet. (Its `feesUsd` label is still network fee + 0.5%; the pump.fun fee
+and slippage are inside the real SOL delta, just not itemised.)
 
 WSS stays listen-only (slotSubscribe as today). No signatureSubscribe was added;
 HTTPS polling is simpler and was enough.
