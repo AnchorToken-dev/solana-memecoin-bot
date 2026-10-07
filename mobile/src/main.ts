@@ -209,6 +209,7 @@ async function paintStatus(main: Element) {
   const stall = runningNow && cycleAgeMs != null && cycleAgeMs > 45_000;
   main.innerHTML = `
     ${chaseLockoutBanner(lock)}
+    ${hardLossCard(status)}
     <div class="card">
       <h2>Engine status</h2>
       <div class="row"><span class="k">Health</span><span class="v">${health.ok ? "ok" : "bad"}</span></div>
@@ -284,6 +285,7 @@ async function paintControl(main: Element) {
       </div>
       <p class="muted" style="margin-top:10px"><strong>Exit now</strong> / <strong>Reset</strong> live on the <strong>PnL</strong> tab (near equity / open position). Change take-profit via server env <code>TAKE_PROFIT_PCT</code> (default 25; 0 = off).</p>
     </div>
+    ${hardLossCard(status)}
     ${tradeSizeCard(status)}
     ${pinCard(status)}`;
   main.querySelectorAll("button[data-size]").forEach((btn) => {
@@ -1325,5 +1327,25 @@ function tradeSizeCard(status: Record<string, unknown>): string {
       ${ts.warning ? `<p class="warn-text">${escapeHtml(ts.warning)}</p>` : ""}
       <div class="size-row">${btns}</div>
       <p class="muted">Applies to new buys only. Coins already held keep their size.</p>
+    </div>`;
+}
+
+/** Hard daily loss limit — big text: limit, lost today, room left. */
+function hardLossCard(status: Record<string, unknown>): string {
+  const h = status.hardDailyLoss as
+    | { limitUsd: number; todayLossUsd: number; remainingUsd: number; locked: boolean; lockedUntil: number | null; warnings?: string[] }
+    | undefined;
+  if (!h) return "";
+  const until = h.lockedUntil ? new Date(h.lockedUntil).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) : "";
+  return `
+    <div class="card hard-loss ${h.locked ? "locked" : ""}">
+      <h2>Daily loss limit</h2>
+      ${h.locked ? `<div class="hl-lock">🛑 LOCKED — no new buys until midnight ET${until ? ` (${escapeHtml(until)})` : ""}</div>` : ""}
+      <div class="hl-grid">
+        <div><div class="hl-k">Limit</div><div class="hl-v">$${h.limitUsd.toFixed(0)}</div></div>
+        <div><div class="hl-k">Lost today</div><div class="hl-v">$${h.todayLossUsd.toFixed(2)}</div></div>
+        <div><div class="hl-k">Room left</div><div class="hl-v">$${h.remainingUsd.toFixed(2)}</div></div>
+      </div>
+      ${(h.warnings ?? []).map((w) => `<p class="warn-text">${escapeHtml(w)}</p>`).join("")}
     </div>`;
 }

@@ -117,6 +117,13 @@ export interface BotConfig {
   tradingMode?: TradingMode;
   /** Live hard caps (env only, never PATCH-able). Present only in live modes. */
   live?: LiveSettings;
+  /**
+   * HARD daily loss limit for paper / dry-run / live (ET day, realized + unrealized).
+   * Always within (0, 300]; loadConfig / PATCH clamp anything else to 300.
+   */
+  hardDailyLossUsd?: number;
+  /** Clamp warnings from env/config/overlay/PATCH. */
+  hardDailyLossWarnings?: string[];
 }
 
 export interface TokenSnapshot {

@@ -88,3 +88,19 @@ be noticeably worse than paper before any slippage. Consider raising paper
   a warning shows.
 - Every new buy = min(normal sizing, selected size, cap). Journal rows store `tradeSizeUsd`.
 - Phone: three big buttons + the active size in large text. Switching to $60 in LIVE asks to confirm first.
+
+## Hard daily loss limit ($300, cannot be disabled)
+
+- `HARD_DAILY_LOSS_CEILING_USD = 300` in `src/risk/hardDailyLoss.ts`. `HARD_DAILY_LOSS_USD` (env), `hardDailyLossUsd`
+  (config file / runtime overlay / `PATCH /config`) and `LIVE_DAILY_LOSS_LIMIT_USD` can only **lower** it.
+  Missing → 300. 0, negative, non-numeric, `off`/`false`, null and >300 → 300 with a warning (shown in `/status`).
+  The effective limit is the lowest of these.
+- Applies in **paper, dry-run and live**. Each mode keeps its own tally.
+- Loss today = net realized P&L of closes since ET midnight + unrealized losses on open positions (last mark).
+- When hit: new buys are blocked, exits keep running, a loud `/alerts` event fires and a `data/live-events.json` row
+  is written. The lock is persisted in `data/hard-daily-loss.json` until the next ET midnight. `/runner/reset`,
+  restarts, journal clear and raising the setting do not clear it. An unreadable lock file fails **closed** for the day.
+- Shown in `/status.hardDailyLoss` and `/portfolio.hardDailyLoss` (limit, todayLossUsd, remainingUsd, locked,
+  lockedUntil, warnings), and on the phone in large text.
+- Paper's old session cap (`DAILY_LOSS_USD`, which stops the runner and is cleared by Reset) is unchanged
+  and still separate.

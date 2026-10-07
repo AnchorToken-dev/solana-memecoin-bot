@@ -1,3 +1,4 @@
+import { clampHardDailyLoss } from "../risk/hardDailyLoss.js";
 /**
  * Trading-mode gate. PAPER is the default and wins on ANY doubt.
  *
@@ -48,6 +49,8 @@ export interface LiveSettings {
   maxPositionUsd: number;
   maxOpenPositions: number;
   dailyLossLimitUsd: number;
+  /** Clamp warnings (e.g. LIVE_DAILY_LOSS_LIMIT_USD=0 → 300). */
+  warnings: string[];
   minSolReserve: number;
   slippageBps: number;
   sellMaxSlippageBps: number;
@@ -72,10 +75,13 @@ export function loadLiveSettings(env: Env = process.env): LiveSettings {
   const priorityFeeMaxSol = num(env, "LIVE_PRIORITY_FEE_MAX_SOL", 0.001, 0, 0.01);
   const slippageBps = num(env, "LIVE_SLIPPAGE_BPS", 1500, 10, 5000);
   const pool = (env.LIVE_POOL ?? "auto").trim();
+  // Hard $300 ceiling: can only be lowered, never raised or disabled.
+  const dailyClamp = clampHardDailyLoss(env.LIVE_DAILY_LOSS_LIMIT_USD, "LIVE_DAILY_LOSS_LIMIT_USD");
   return {
     maxPositionUsd: num(env, "LIVE_MAX_POSITION_USD", 60, 1, 1000),
     maxOpenPositions: Math.floor(num(env, "LIVE_MAX_OPEN_POSITIONS", 1, 1, 5)),
-    dailyLossLimitUsd: num(env, "LIVE_DAILY_LOSS_LIMIT_USD", 30, 1, 10_000),
+    dailyLossLimitUsd: dailyClamp.usd,
+    warnings: dailyClamp.warning ? [dailyClamp.warning] : [],
     minSolReserve: num(env, "LIVE_MIN_SOL_RESERVE", 0.05, 0.01, 10),
     slippageBps,
     sellMaxSlippageBps: Math.max(slippageBps, num(env, "LIVE_SELL_MAX_SLIPPAGE_BPS", 4000, 10, 9000)),

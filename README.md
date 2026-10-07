@@ -345,7 +345,14 @@ Technical details: [docs/live-trading.md](docs/live-trading.md).
    is sent and no SOL moves. Look for errors on the Status tab.
 6. **Go live.** Change only `LIVE_DRY_RUN=false` and restart. The banner turns
    red: **LIVE · REAL MONEY**. Defaults: $15 per trade (change with the $15 / $30 / $60 buttons on the phone; never above `LIVE_MAX_POSITION_USD`, default 60), 1 coin at a time, stop
-   buying after −$30 in one day (resets at midnight ET), rug filter always on.
+   buying after −$300 in one day (the hard limit — see below), rug filter always on.
+
+**Hard daily loss limit ($300, always on — paper too):** once today's losses
+(closed trades plus coins currently down) reach $300 (or a lower number you set
+with `HARD_DAILY_LOSS_USD` / `LIVE_DAILY_LOSS_LIMIT_USD`), the bot stops buying
+until midnight ET. Coins it already holds still get their stop/take-profit.
+Reset, restart, or editing settings will **not** unlock it early. The phone
+shows the limit, what you've lost today, and the room left in big numbers.
 
 **Emergency:** Stop on the phone (or `POST /runner/stop`) stops new buys right
 away. Coins already held keep their stop-loss / take-profit until they sell.

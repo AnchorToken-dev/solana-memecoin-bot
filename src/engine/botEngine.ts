@@ -67,6 +67,11 @@ import { PumpPortalBuilder } from "../live/pumpportal.js";
 import { redactSecrets } from "../live/redact.js";
 import { startOfDay } from "../journal/timezone.js";
 import {
+  HardDailyLossStore,
+  clampHardDailyLoss,
+  type HardDailyLossStatus,
+} from "../risk/hardDailyLoss.js";
+import {
   TradeSizeStore,
   isTradeSize,
   tradeSizeStatus,
@@ -130,6 +135,8 @@ export interface EngineStatus {
   live: LiveStatus | null;
   /** Hot-button trade size for NEW buys. */
   tradeSize: TradeSizeStatus;
+  /** HARD daily loss limit (cannot be disabled; $300 ceiling). */
+  hardDailyLoss: HardDailyLossStatus;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -201,9 +208,11 @@ export class BotEngine {
   private liveSolBalance: number | null = null;
   private liveSolBalanceAt: number | null = null;
   private lastLiveError: string | null = null;
-  private dailyLossAlertDay: number | null = null;
   private readonly sellFailAlerted = new Set<string>();
   readonly tradeSizeStore: TradeSizeStore;
+  readonly hardLossStore: HardDailyLossStore;
+  /** Last seen marks for open positions (unrealized loss for the hard limit). */
+  private readonly lastMarks = new Map<string, number>();
 
   constructor(
     cfg: BotConfig,
@@ -231,6 +240,8 @@ export class BotEngine {
       solanaWs?: ReadOnlySolanaWs | null;
       /** Live broker for tests. Ignored in paper mode. */
       liveBroker?: LiveBroker | null;
+      /** Hard daily loss store (tests inject a clock). */
+      hardLossStore?: HardDailyLossStore;
     },
   ) {
     this.cfg = cfg;
@@ -245,6 +256,7 @@ export class BotEngine {
       );
     this.liveBroker = this.isLiveMode(cfg) ? (deps?.liveBroker ?? null) : null;
     this.tradeSizeStore = new TradeSizeStore(cfg.ledgerDir);
+    this.hardLossStore = deps?.hardLossStore ?? new HardDailyLossStore(cfg.ledgerDir);
     this.journal =
       deps?.journal ?? new TradeJournal(cfg.ledgerDir);
     this.checklist =
@@ -315,7 +327,60 @@ export class BotEngine {
       modeLabel: modeLabel(this.tradingMode),
       live: this.liveStatus(),
       tradeSize: this.getTradeSize(),
+      hardDailyLoss: this.getHardDailyLoss(),
     };
+  }
+
+  /** Effective hard limit: min(config/env/PATCH value, live cap), always in (0, 300]. */
+  hardDailyLossLimit(): { usd: number; warnings: string[] } {
+    const base = clampHardDailyLoss(this.cfg.hardDailyLossUsd, "hardDailyLossUsd");
+    const warnings = [...(this.cfg.hardDailyLossWarnings ?? []), ...(base.warning ? [base.warning] : [])];
+    let usd = base.usd;
+    if (this.isLiveMode() && this.cfg.live) {
+      const l = clampHardDailyLoss(this.cfg.live.dailyLossLimitUsd, "LIVE_DAILY_LOSS_LIMIT_USD");
+      usd = Math.min(usd, l.usd);
+      warnings.push(...this.cfg.live.warnings, ...(l.warning ? [l.warning] : []));
+    }
+    return { usd, warnings: [...new Set(warnings)] };
+  }
+
+  private unrealizedLossUsd(): number {
+    let loss = 0;
+    for (const p of this.ledger.openPositions) {
+      const mark = this.lastMarks.get(p.mint);
+      if (mark == null || !(mark > 0)) continue;
+      const pnl = p.qty * mark - p.entryNotionalUsd;
+      if (pnl < 0) loss += -pnl;
+    }
+    return loss;
+  }
+
+  getHardDailyLoss(): HardDailyLossStatus {
+    const lim = this.hardDailyLossLimit();
+    return this.hardLossStore.status(this.tradingMode, lim.usd, this.unrealizedLossUsd(), lim.warnings);
+  }
+
+  /** @returns true when new buys must be blocked (locked now or just hit). */
+  private checkHardDailyLoss(): boolean {
+    const mode = this.tradingMode;
+    if (this.hardLossStore.isLocked(mode)) return true;
+    const st = this.getHardDailyLoss();
+    if (st.todayLossUsd < st.limitUsd) return false;
+    this.hardLossStore.lock(mode, st.todayLossUsd);
+    const until = new Date(this.hardLossStore.status(mode, st.limitUsd, 0, []).lockedUntil ?? 0).toLocaleString("en-US", { timeZone: ET_TZ });
+    const msg = `HARD DAILY LOSS LIMIT HIT: down $${st.todayLossUsd.toFixed(2)} today (limit $${st.limitUsd}). No new buys until midnight ET (${until}). Open coins are still managed. Reset/restart will NOT clear this.`;
+    log.error(msg);
+    this.events.push("daily_loss_cap", "🛑 HARD DAILY LOSS LIMIT HIT", msg, {
+      todayLossUsd: st.todayLossUsd,
+      limitUsd: st.limitUsd,
+      hard: true,
+    });
+    try {
+      this.journal.appendEvent({ kind: "hard_daily_loss_lock", symbol: "-", mint: "-", detail: msg });
+    } catch {
+      /* never block exits */
+    }
+    return true;
   }
 
   /** Active cap: LIVE_MAX_POSITION_USD in live/dry-run, MAX_POSITION_USD in paper. */
@@ -353,13 +418,11 @@ export class BotEngine {
   }
 
   private liveTodayRealized(): number {
-    return this.journal.realizedSince(startOfDay(Date.now(), ET_TZ), this.tradingMode);
+    return this.hardLossStore.realizedToday(this.tradingMode);
   }
 
   private liveDailyLossHit(): boolean {
-    const live = this.cfg.live;
-    if (!live) return false;
-    return this.liveTodayRealized() <= -live.dailyLossLimitUsd;
+    return this.hardLossStore.isLocked(this.tradingMode);
   }
 
   private liveStatus(): LiveStatus | null {
@@ -376,7 +439,7 @@ export class BotEngine {
       caps: {
         maxPositionUsd: live.maxPositionUsd,
         maxOpenPositions: live.maxOpenPositions,
-        dailyLossLimitUsd: live.dailyLossLimitUsd,
+        dailyLossLimitUsd: this.hardDailyLossLimit().usd,
         minSolReserve: live.minSolReserve,
         slippageBps: live.slippageBps,
         sellMaxSlippageBps: live.sellMaxSlippageBps,
@@ -790,7 +853,10 @@ export class BotEngine {
     const marks = new Map<string, number>();
     for (const p of this.ledger.openPositions) {
       const px = await this.market.getPrice(p.mint);
-      if (px != null) marks.set(p.mint, px);
+      if (px != null) {
+        marks.set(p.mint, px);
+        this.lastMarks.set(p.mint, px);
+      }
     }
     return this.ledger.snapshot(marks);
   }
@@ -1071,6 +1137,7 @@ export class BotEngine {
       signature: fill.signature ?? null,
       ...(note ? { note } : {}),
     });
+    this.hardLossStore.recordClose(fill.mode ?? "paper", realizedPnlUsd);
     const reason = fill.reason ?? "unknown";
     const pnlSign = realizedPnlUsd >= 0 ? "+" : "";
     const body = `${position.symbol}: ${pnlSign}$${realizedPnlUsd.toFixed(2)} (${pnlSign}${entry.pnlPct.toFixed(1)}%) · ${reason}`;
@@ -1611,6 +1678,7 @@ export class BotEngine {
       if (!ledger.openPositions.some((p) => p.id === pos.id)) {
         continue;
       }
+      this.lastMarks.set(pos.mint, mark);
       const { position: updated, exit } = evaluateExit(pos, mark, cfg, now);
       ledger.replacePosition(updated);
       if (exit) {
@@ -1645,6 +1713,12 @@ export class BotEngine {
       return true;
     }
 
+    // HARD daily loss (all modes): blocks new buys only; exits above already ran.
+    if (this.checkHardDailyLoss()) {
+      log.debug(`Cycle ${cycle}: hard daily loss lock — no new buys`);
+      return false;
+    }
+
     if (!canOpenAnother(ledger.openPositions.length, cfg)) {
       log.debug(`Cycle ${cycle}: at max open trades (skipped entry scan)`);
       return false;
@@ -1652,18 +1726,6 @@ export class BotEngine {
     if (this.isLiveMode() && cfg.live) {
       if (ledger.openPositions.length >= cfg.live.maxOpenPositions) {
         log.debug(`Cycle ${cycle}: at LIVE_MAX_OPEN_POSITIONS`);
-        return false;
-      }
-      if (this.liveDailyLossHit()) {
-        const day = startOfDay(now, ET_TZ);
-        if (this.dailyLossAlertDay !== day) {
-          this.dailyLossAlertDay = day;
-          const msg = `LIVE daily loss limit hit (today $${this.liveTodayRealized().toFixed(2)} ≤ −$${cfg.live.dailyLossLimitUsd}). No new buys until tomorrow (ET). Open positions still managed.`;
-          log.warn(msg);
-          this.events.push("daily_loss_cap", "LIVE daily loss limit hit", msg, {
-            todayRealizedUsd: this.liveTodayRealized(),
-          });
-        }
         return false;
       }
     }

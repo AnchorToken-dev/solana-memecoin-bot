@@ -189,6 +189,7 @@ export function createControlApp(engine: BotEngine) {
         bankrollUsd: engine.cfg.bankrollUsd,
         maxPositionUsd: engine.cfg.maxPositionUsd,
         tradeSize: engine.getTradeSize(),
+        hardDailyLoss: engine.getHardDailyLoss(),
         vaultUsd: portfolio.vaultUsd,
         tradableCashUsd: portfolio.tradableCashUsd,
         chaseLockout: engine.getChaseLockout(),

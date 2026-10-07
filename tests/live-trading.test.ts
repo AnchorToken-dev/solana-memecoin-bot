@@ -103,7 +103,7 @@ describe("live caps", () => {
     const s = loadLiveSettings({});
     assert.equal(s.maxPositionUsd, 60);
     assert.equal(s.maxOpenPositions, 1);
-    assert.equal(s.dailyLossLimitUsd, 30);
+    assert.equal(s.dailyLossLimitUsd, 300);
     assert.ok(s.priorityFeeSol <= s.priorityFeeMaxSol);
   });
   it("priority fee is clamped to the hard cap", () => {
