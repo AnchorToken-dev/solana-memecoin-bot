@@ -29,8 +29,8 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 | Min age | `3` minutes | `MIN_AGE_MINUTES` (when `createdAt` known; 0 = off) |
 | Trail activate | `+15%` from entry | `TRAIL_ACTIVATE_PCT` |
 | Trail distance | `5%` from HWM | `TRAIL_DISTANCE_PCT` |
-| Slippage (sim) | `50` bps | `SLIPPAGE_BPS` |
-| Fee (sim) | `30` bps | `FEE_BPS` |
+| Paper costs | **realistic**: pump.fun 1.25% + PumpPortal 0.5% per side, base + priority fee per tx, ~0.0015 SOL token-account rent per coin, size-aware slippage | `PAPER_FEE_MODEL=realistic\|legacy` and `PAPER_*` knobs — see [docs/paper-fees.md](docs/paper-fees.md) |
+| Slippage (flat fallback) | `50` bps | `SLIPPAGE_BPS` (used when pool liquidity is unknown, or in flat/legacy) |
 | Market data | `mock` | `MARKET_DATA_SOURCE=mock\|dexscreener\|pumpfun` |
 | Config file | `config/default.json` | `CONFIG_FILE` (e.g. `config/pumpfun-preset.json`) |
 | Control API | `0.0.0.0:8787` | `API_HOST` / `API_PORT` |

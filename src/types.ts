@@ -1,6 +1,8 @@
 /** Shared domain types for the paper momentum bot. */
 import type { LiveSettings, TradingMode } from "./live/mode.js";
 export type { TradingMode } from "./live/mode.js";
+import type { FeeBreakdown, PaperFeeSettings, PaperVenue } from "./broker/paperFees.js";
+export type { FeeBreakdown, PaperFeeSettings, PaperVenue } from "./broker/paperFees.js";
 
 export interface MomentumParams {
   minPct: number;
@@ -23,8 +25,19 @@ export interface TrailingTakeProfitParams {
 }
 
 export interface PaperBrokerParams {
+  /**
+   * Flat slippage per side (bps). Realistic model: used only when pool
+   * liquidity is unknown or PAPER_SLIPPAGE_MODEL=flat. Legacy model: always.
+   */
   slippageBps: number;
+  /** Legacy flat fee per side (bps). Ignored by the realistic model. */
   feeBps: number;
+  /**
+   * Itemised cost model (pump.fun fee, PumpPortal, network, rent, slippage).
+   * loadConfig always sets it (realistic by default). Absent = legacy flat
+   * fee/slippage (keeps old fixtures exact).
+   */
+  fees?: PaperFeeSettings;
 }
 
 export interface RunnerParams {
@@ -152,6 +165,11 @@ export interface TokenSnapshot {
   bondingCurve?: string;
   /** Pump.fun `associated_bonding_curve` token account, when present. */
   associatedBondingCurve?: string;
+  /**
+   * bonding_curve = still on pump.fun's curve; pumpswap = graduated.
+   * From Pump.fun `complete` or DexScreener dexId. Absent = unknown.
+   */
+  venue?: PaperVenue;
 }
 
 export type Side = "buy" | "sell";
@@ -177,6 +195,11 @@ export interface Position {
   openedAt: number;
   /** Hot-button trade size selected when this position was bought. */
   tradeSizeUsd?: number;
+  /** Paper cost model: venue + pool liquidity seen at entry (for exit fees/slippage). */
+  venue?: PaperVenue;
+  entryLiquidityUsd?: number;
+  /** Paper cost model: itemised buy-side costs. */
+  entryFeeBreakdown?: FeeBreakdown;
 }
 
 export interface Fill {
@@ -198,6 +221,8 @@ export interface Fill {
   mode?: TradingMode;
   /** On-chain tx signature (live sends only). */
   signature?: string | null;
+  /** Itemised paper costs for this fill (realistic paper model only). */
+  feeBreakdown?: FeeBreakdown;
 }
 
 export interface TradeRecord {

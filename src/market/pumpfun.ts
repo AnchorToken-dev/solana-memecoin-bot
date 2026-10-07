@@ -427,6 +427,10 @@ export class PumpFunMarketData {
       ...(creator ? { creator } : {}),
       ...(bondingCurve ? { bondingCurve } : {}),
       ...(associatedBondingCurve ? { associatedBondingCurve } : {}),
+      // Graduated (complete) coins trade on PumpSwap; others on the curve.
+      ...(typeof coin.complete === "boolean"
+        ? { venue: coin.complete ? ("pumpswap" as const) : ("bonding_curve" as const) }
+        : {}),
     };
   }
 
@@ -616,6 +620,7 @@ export class PumpFunMarketData {
             liquidityUsd: p.liquidity?.usd ?? 0,
             timestamp: Date.now(),
             ...(createdAt != null ? { createdAt } : {}),
+            venue: dex === "pumpswap" ? "pumpswap" : "bonding_curve",
           });
           if (byMint.size >= limit) break;
         }

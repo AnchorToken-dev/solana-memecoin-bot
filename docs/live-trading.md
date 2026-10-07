@@ -73,9 +73,10 @@ $15 ≈ 0.127 SOL.
 | Token account rent (~0.002 SOL, first buy of each coin; only refunded if the account is closed) | | ~$0.24 |
 | **Total before slippage** | | **≈ $0.80 (≈ 5% of $15)** |
 
-Paper models 0.5% slippage + 0.3% fee (about $0.24 per round trip), so live will
-be noticeably worse than paper before any slippage. Consider raising paper
-`FEE_BPS` to ~200 to preview it.
+Paper now charges these same costs by default (`PAPER_FEE_MODEL=realistic`,
+see [paper-fees.md](paper-fees.md)), so paper and live should line up much more
+closely. `PAPER_FEE_MODEL=legacy` restores the old flat 0.5% slippage + 0.3% fee
+(about $0.24 per round trip) for comparison.
 
 ## Trade-size hot buttons ($15 / $30 / $60)
 

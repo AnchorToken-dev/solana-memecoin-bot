@@ -9,6 +9,7 @@ import { solanaRpcWssIsConfigured } from "./solana/ws.js";
 import { clampHardDailyLoss } from "./risk/hardDailyLoss.js";
 import { resolveTradingMode, loadLiveSettings } from "./live/mode.js";
 import { LIVE_WALLET_KEYPAIR_PATH_ENV } from "./live/keypair.js";
+import { loadPaperFeeSettings } from "./broker/paperFees.js";
 
 loadDotenv();
 
@@ -39,6 +40,22 @@ const ConfigSchema = z.object({
   paperBroker: z.object({
     slippageBps: z.number().nonnegative(),
     feeBps: z.number().nonnegative(),
+    fees: z
+      .object({
+        model: z.enum(["realistic", "legacy"]),
+        pumpCurveFeeBps: z.number().nonnegative(),
+        pumpSwapFeeBps: z.number().nonnegative().nullable(),
+        pumpPortalFeeBps: z.number().nonnegative(),
+        baseFeeSol: z.number().nonnegative(),
+        priorityFeeSol: z.number().nonnegative(),
+        tokenAccountRentSol: z.number().nonnegative(),
+        slippageModel: z.enum(["liquidity", "flat"]),
+        slippageBaseBps: z.number().nonnegative(),
+        slippageMaxBps: z.number().nonnegative(),
+        defaultVenue: z.enum(["bonding_curve", "pumpswap"]),
+        solUsdFallback: z.number().positive(),
+      })
+      .optional(),
   }),
   runner: z.object({
     pollIntervalMs: z.number().int().positive(),
@@ -502,6 +519,8 @@ export function loadConfig(opts?: {
         file.paperBroker?.slippageBps ?? 50,
       ),
       feeBps: envNum("FEE_BPS", file.paperBroker?.feeBps ?? 30),
+      // Itemised realistic costs (env only). PAPER_FEE_MODEL=legacy → old flat model.
+      fees: loadPaperFeeSettings(process.env),
     },
     runner: {
       pollIntervalMs: envNum(
@@ -553,6 +572,16 @@ export function loadConfig(opts?: {
     const overlayPath =
       opts?.runtimePath ?? runtimeConfigPath(merged.ledgerDir);
     applyOverlay(merged, loadRuntimeOverlay(overlayPath));
+  }
+
+  if (
+    merged.paperBroker.fees?.model === "realistic" &&
+    process.env.FEE_BPS !== undefined &&
+    process.env.FEE_BPS !== ""
+  ) {
+    console.warn(
+      "[paper-fees] FEE_BPS is ignored by the realistic paper cost model (PAPER_FEE_MODEL=legacy restores it). See .env.example → Paper trading costs.",
+    );
   }
 
   merged.activePreset = inferActivePreset(merged);

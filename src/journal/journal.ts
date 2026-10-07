@@ -18,7 +18,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { ExitReason, Fill, Position } from "../types.js";
+import type { ExitReason, FeeBreakdown, Fill, Position } from "../types.js";
 import { log } from "../logging.js";
 import {
   JOURNAL_TZ_DEFAULT,
@@ -84,6 +84,16 @@ export interface JournalEntry {
   signature: string | null;
   /** Hot-button trade size used for the buy ($15/$30/$60). null on old rows. */
   tradeSizeUsd: number | null;
+  /**
+   * Realistic paper cost model only (absent on old / live rows):
+   * total fees for the round trip (buy + sell, excl. slippage) — already
+   * inside pnlUsd, which is always net.
+   */
+  feesUsd?: number;
+  /** Buy + sell price slippage (USD), already inside pnlUsd. */
+  slippageUsd?: number;
+  /** Itemised buy / sell costs. */
+  feeBreakdown?: { entry: FeeBreakdown | null; exit: FeeBreakdown | null };
 }
 
 export type JournalModeFilter = TradingMode | "all";
@@ -277,6 +287,18 @@ function normalizeEntry(raw: unknown): JournalEntry | null {
     mode: e.mode === "live" || e.mode === "live_dry_run" ? e.mode : "paper",
     signature: typeof e.signature === "string" ? e.signature : null,
     tradeSizeUsd: typeof e.tradeSizeUsd === "number" ? e.tradeSizeUsd : null,
+    ...(typeof e.feesUsd === "number" && Number.isFinite(e.feesUsd) ? { feesUsd: e.feesUsd } : {}),
+    ...(typeof e.slippageUsd === "number" && Number.isFinite(e.slippageUsd)
+      ? { slippageUsd: e.slippageUsd }
+      : {}),
+    ...(e.feeBreakdown && typeof e.feeBreakdown === "object"
+      ? {
+          feeBreakdown: {
+            entry: e.feeBreakdown.entry ?? null,
+            exit: e.feeBreakdown.exit ?? null,
+          },
+        }
+      : {}),
   };
 }
 
@@ -581,6 +603,8 @@ export class TradeJournal {
     checklistThesis?: string | null;
     mode?: TradingMode;
     signature?: string | null;
+    /** Sell fill — realistic paper costs are read from it when present. */
+    exitFill?: Pick<Fill, "feesUsd" | "slippageUsd" | "feeBreakdown">;
   }): JournalEntry {
     const sizeUsd = args.position.entryNotionalUsd;
     const pnlPct = sizeUsd > 0 ? (args.pnlUsd / sizeUsd) * 100 : 0;
@@ -629,6 +653,14 @@ export class TradeJournal {
       signature: args.signature ?? null,
       tradeSizeUsd: typeof args.position.tradeSizeUsd === "number" ? args.position.tradeSizeUsd : null,
     };
+    const exitBd = args.exitFill?.feeBreakdown;
+    const entryBd = args.position.entryFeeBreakdown;
+    if (exitBd || entryBd) {
+      const r = (n: number) => Math.round(n * 1e6) / 1e6;
+      entry.feesUsd = r((entryBd?.totalFeesUsd ?? 0) + (exitBd?.totalFeesUsd ?? 0));
+      entry.slippageUsd = r((entryBd?.slippageUsd ?? 0) + (exitBd?.slippageUsd ?? 0));
+      entry.feeBreakdown = { entry: entryBd ?? null, exit: exitBd ?? null };
+    }
     this.entries.push(entry);
     this.persist();
     log.info("Journal close recorded", {
