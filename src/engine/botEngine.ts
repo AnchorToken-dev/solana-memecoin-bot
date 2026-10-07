@@ -606,10 +606,15 @@ export class BotEngine {
     reason: import("../types.js").ExitReason,
   ): Promise<Fill | null> {
     if (!this.isLiveMode() || !this.liveBroker) {
+      // SOL/USD prices the network fees in the realistic paper cost model.
+      const solUsd = await this.resolveQuoteUsdRate();
+      // That await yields: a concurrent tick / manual exit may have closed it.
+      if (!this.ledger.openPositions.some((p) => p.id === pos.id)) return null;
       const { fill, proceedsUsd, realizedPnlUsd } = this.broker.applySell({
         position: pos,
         markPrice,
         reason,
+        solUsd,
       });
       this.ledger.recordSell(fill, realizedPnlUsd, proceedsUsd);
       await this.recordJournalClose(pos, fill, realizedPnlUsd);
@@ -1247,6 +1252,7 @@ export class BotEngine {
       checklistThesis: cl?.thesis ?? null,
       mode: fill.mode ?? "paper",
       signature: fill.signature ?? null,
+      exitFill: fill,
       ...(note ? { note } : {}),
     });
     this.hardLossStore.recordClose(fill.mode ?? "paper", realizedPnlUsd);
@@ -1573,6 +1579,8 @@ export class BotEngine {
         }
       }
       const fill = await this.closePosition(pos, mark, "manual_exit");
+      // Paper: null only means a concurrent tick closed it first.
+      if (!fill && !this.isLiveMode()) continue;
       if (!fill) {
         const portfolio = await this.getPortfolio();
         return {
@@ -1989,11 +1997,16 @@ export class BotEngine {
       position = { ...res.position, tradeSizeUsd: tradeSize.selectedUsd };
       void this.refreshLiveBalance();
     } else {
+      const entrySnap = snaps.find((s) => s.mint === entry.mint);
       ({ fill, position } = broker.applyBuy({
         mint: entry.mint,
         symbol: entry.symbol,
         markPrice: entry.priceUsd,
         notionalUsd: sized.notionalUsd,
+        // Realistic paper costs: SOL-priced fees, venue fee tier, size-aware slippage.
+        solUsd: await this.resolveQuoteUsdRate(),
+        ...(entrySnap?.venue ? { venue: entrySnap.venue } : {}),
+        ...(entrySnap && entrySnap.liquidityUsd > 0 ? { liquidityUsd: entrySnap.liquidityUsd } : {}),
       }));
       position = { ...position, tradeSizeUsd: tradeSize.selectedUsd };
     }
