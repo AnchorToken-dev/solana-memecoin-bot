@@ -6,7 +6,8 @@
  *   npm run api        # HTTP control API for mobile UI (starts stopped)
  *   npm run paper      # explicit PAPER_MODE=true CLI loop
  *
- * No private keys required. Live swaps are stubbed.
+ * No private keys required for paper. Live (opt-in, gated) loads a local
+ * keypair FILE path only — see README "Going live".
  */
 import { loadConfig, assertPaperOrStubLive } from "./config.js";
 import { BotEngine } from "./engine/botEngine.js";
@@ -25,6 +26,10 @@ async function main(): Promise<void> {
   const cfg = loadConfig();
   assertPaperOrStubLive(cfg);
   const mode = modeFromArgs();
+  if (cfg.tradingMode && cfg.tradingMode !== "paper") {
+    const label = cfg.tradingMode === "live" ? "LIVE — REAL MONEY" : "LIVE DRY-RUN — simulate only, nothing is sent";
+    console.log(`\n  >>> MODE: ${label} <<<\n  Caps: $${cfg.live?.maxPositionUsd}/trade · ${cfg.live?.maxOpenPositions} open · daily loss $${cfg.live?.dailyLossLimitUsd} · rug filter ON\n`);
+  }
 
   console.log(`
 ╔══════════════════════════════════════════════════════════╗
@@ -50,6 +55,7 @@ async function main(): Promise<void> {
   Checklist: http://127.0.0.1:${port}/checklist  (research GO/NO-GO; POST create)
   Alerts:    http://127.0.0.1:${port}/alerts?since=0  (session events for phone notifications)
   Config:    http://127.0.0.1:${port}/config
+  Sell all:  POST http://127.0.0.1:${port}/runner/sell-all  (halt buys + flatten)
   Patch:     PATCH http://127.0.0.1:${port}/config  (paper knobs; stop runner first)
   Preset:    POST  http://127.0.0.1:${port}/config/preset  { "preset": "momentum"|"sniper" }
 

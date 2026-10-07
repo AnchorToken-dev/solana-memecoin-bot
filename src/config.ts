@@ -6,6 +6,8 @@ import type { ActivePreset, BotConfig } from "./types.js";
 import { PRESETS, isPresetName, type PresetName } from "./presets.js";
 import { solanaRpcIsConfigured } from "./solana/rpc.js";
 import { solanaRpcWssIsConfigured } from "./solana/ws.js";
+import { resolveTradingMode, loadLiveSettings } from "./live/mode.js";
+import { LIVE_WALLET_KEYPAIR_PATH_ENV } from "./live/keypair.js";
 
 loadDotenv();
 
@@ -540,15 +542,51 @@ export function loadConfig(opts?: {
   }
 
   merged.activePreset = inferActivePreset(merged);
-  return ConfigSchema.parse(merged);
+  return applyTradingModeGates(ConfigSchema.parse(merged) as BotConfig);
 }
 
-export function assertPaperOrStubLive(cfg: BotConfig): void {
-  if (cfg.paperMode) return;
-  // Live path is intentionally stubbed — refuse to run without explicit future wiring.
-  throw new Error(
-    "LIVE mode is stubbed. Keep PAPER_MODE=true. See README § Live wiring (stub).",
-  );
+/**
+ * Apply the live gates to a loaded config. Every gate must pass or we stay
+ * PAPER (paperMode forced true). Exported for tests.
+ */
+export function applyTradingModeGates(
+  cfg: BotConfig,
+  env: Record<string, string | undefined> = process.env,
+): BotConfig {
+  const decision = resolveTradingMode(env);
+  cfg.tradingMode = decision.mode;
+  if (decision.mode === "paper") {
+    if (!cfg.paperMode) {
+      // PAPER_MODE=false alone is NOT enough — fall back to paper loudly.
+      console.warn(
+        `[live-gate] Staying in PAPER mode: ${decision.paperReasons.join("; ")}`,
+      );
+    }
+    cfg.paperMode = true;
+    delete cfg.live;
+    return cfg;
+  }
+  cfg.paperMode = false;
+  cfg.live = loadLiveSettings(env);
+  // Rug filter is mandatory in any live mode.
+  cfg.rugFilterEnabled = true;
+  return cfg;
+}
+
+/** Throws (refuses to start) when live is selected but prerequisites are missing. */
+export function assertPaperOrStubLive(
+  cfg: BotConfig,
+  env: Record<string, string | undefined> = process.env,
+): void {
+  if (cfg.paperMode || !cfg.tradingMode || cfg.tradingMode === "paper") return;
+  const missing: string[] = [];
+  if (!env[LIVE_WALLET_KEYPAIR_PATH_ENV]?.trim()) missing.push(LIVE_WALLET_KEYPAIR_PATH_ENV);
+  if (!env.SOLANA_RPC_URL?.trim()) missing.push("SOLANA_RPC_URL");
+  if (missing.length > 0) {
+    throw new Error(
+      `Refusing to start LIVE: missing ${missing.join(", ")}. Unset LIVE_TRADING_ENABLED to run paper.`,
+    );
+  }
 }
 
 export { isPresetName };

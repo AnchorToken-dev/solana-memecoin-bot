@@ -14,7 +14,9 @@ export type SessionEventType =
   | "exit_trail"
   | "exit_manual"
   | "exit_time"
-  | "exit_other";
+  | "exit_other"
+  | "live_sell_failed"
+  | "live_buy_unconfirmed";
 
 export interface SessionEvent {
   id: string;

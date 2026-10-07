@@ -549,3 +549,20 @@ button.pin-action {
   font-weight: 700;
   margin: 2px 0 4px 5.6rem;
 }
+
+/* Trading mode banner: large, high-contrast, readable without glasses. */
+.mode-banner {
+  margin-top: 12px;
+  padding: 14px 12px;
+  border-radius: 12px;
+  font-size: 2.2rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-align: center;
+  line-height: 1.1;
+  border: 4px solid transparent;
+}
+.mode-paper { background: #14532d; color: #ffffff; border-color: #22c55e; }
+.mode-live_dry_run { background: #78350f; color: #ffffff; border-color: #fbbf24; }
+.mode-live { background: #b91c1c; color: #ffffff; border-color: #ffffff; }
+.mode-unknown { background: #374151; color: #ffffff; }

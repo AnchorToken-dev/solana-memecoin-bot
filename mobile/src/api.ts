@@ -49,7 +49,9 @@ async function request<T>(
 }
 
 export const api = {
-  health: () => request<{ ok: boolean; paperMode: boolean }>("/health"),
+  health: () => request<{ ok: boolean; paperMode: boolean; tradingMode?: string }>("/health"),
+  sellAll: () =>
+    request<{ ok: boolean; message: string }>("/runner/sell-all", { method: "POST" }),
   status: () => request<Record<string, unknown>>("/status"),
   config: () => request<{ config: Record<string, unknown> }>("/config"),
   lockout: () =>

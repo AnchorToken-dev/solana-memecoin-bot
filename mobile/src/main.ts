@@ -84,13 +84,30 @@ async function withBusy(fn: () => Promise<void>) {
   }
 }
 
+/** Huge PAPER / LIVE DRY-RUN / LIVE banner — readable without glasses. */
+async function paintModeBanner(): Promise<void> {
+  const el = document.querySelector("#modeBanner");
+  if (!el) return;
+  try {
+    const h = await api.health();
+    const m = h.tradingMode ?? (h.paperMode ? "paper" : "unknown");
+    const text = m === "live" ? "LIVE · REAL MONEY" : m === "live_dry_run" ? "LIVE DRY-RUN" : m === "paper" ? "PAPER" : "MODE ?";
+    el.textContent = text;
+    el.className = `mode-banner mode-${m}`;
+  } catch {
+    el.textContent = "OFFLINE";
+    el.className = "mode-banner mode-unknown";
+  }
+}
+
 async function render() {
   const base = await getApiBaseUrl();
   app.innerHTML = `
     <header>
       <h1>Memecoin Paper Bot</h1>
       <p>Phone = control UI · engine stays on your laptop</p>
-      <span class="badge">PAPER ONLY · no wallet keys in app</span>
+      <div id="modeBanner" class="mode-banner mode-unknown" role="status" aria-live="polite">MODE …</div>
+      <span class="badge">No wallet keys in app · ever</span>
     </header>
     <main id="main"></main>
     <nav class="tabs">
@@ -106,6 +123,7 @@ async function render() {
     });
   });
 
+  void paintModeBanner();
   const main = app.querySelector("#main")!;
   if (error) main.insertAdjacentHTML("beforeend", `<div class="err">${escapeHtml(error)}</div>`);
   if (message) main.insertAdjacentHTML("beforeend", `<div class="ok">${escapeHtml(message)}</div>`);
@@ -194,7 +212,8 @@ async function paintStatus(main: Element) {
     <div class="card">
       <h2>Engine status</h2>
       <div class="row"><span class="k">Health</span><span class="v">${health.ok ? "ok" : "bad"}</span></div>
-      <div class="row"><span class="k">Paper mode</span><span class="v">${String(health.paperMode)}</span></div>
+      <div class="row"><span class="k">Mode</span><span class="v">${escapeHtml(String(status.modeLabel ?? (health.paperMode ? "PAPER" : "?")))}</span></div>
+      ${liveRows(status)}
       <div class="row"><span class="k">State</span><span class="v">${escapeHtml(String(status.state))}</span></div>
       <div class="row"><span class="k">Cycle</span><span class="v">${escapeHtml(String(status.cycle ?? 0))}</span></div>
       <div class="row"><span class="k">Source</span><span class="v">${escapeHtml(String(status.marketDataSource ?? "—"))}</span></div>
@@ -247,7 +266,7 @@ async function paintControl(main: Element) {
     ${chaseLockoutBanner(lock)}
     <div class="card">
       <h2>Paper runner</h2>
-      <p class="muted">Start/stop only works while the server has PAPER_MODE=true. Live trading is stubbed — this app never holds keys.</p>
+      <p class="muted">Mode is set on the laptop/Pi only (env). This app never holds keys. In LIVE, Stop halts new buys first; press Stop again to stop fully.</p>
       <div class="row"><span class="k">State</span><span class="v">${escapeHtml(String(status.state))}</span></div>
       <div class="row"><span class="k">Open positions</span><span class="v">${openCount}</span></div>
       <div class="row"><span class="k">Take-profit</span><span class="v">${tp == null ? "—" : tp <= 0 ? "off (env TAKE_PROFIT_PCT)" : `+${tp}% (env TAKE_PROFIT_PCT)`}</span></div>
@@ -258,8 +277,9 @@ async function paintControl(main: Element) {
           : ""
       }
       <div class="actions">
-        <button class="primary" id="start" ${busy||running||locked?"disabled":""}>Start paper bot</button>
+        <button class="primary" id="start" ${busy||running||locked?"disabled":""}>Start ${escapeHtml(String(status.modeLabel ?? "PAPER"))} bot</button>
         <button class="danger" id="stop" ${busy||!running?"disabled":""}>Stop</button>
+        ${status.live ? `<button class="danger" id="sellAll" ${busy?"disabled":""}>STOP + SELL ALL</button>` : ""}
         <button class="secondary" id="refresh">Refresh</button>
       </div>
       <p class="muted" style="margin-top:10px"><strong>Exit now</strong> / <strong>Reset</strong> live on the <strong>PnL</strong> tab (near equity / open position). Change take-profit via server env <code>TAKE_PROFIT_PCT</code> (default 25; 0 = off).</p>
@@ -269,6 +289,13 @@ async function paintControl(main: Element) {
     void withBusy(async () => {
       await onStartRequestAlerts();
       const r = await api.start();
+      message = r.message;
+    });
+  });
+  main.querySelector("#sellAll")?.addEventListener("click", () => {
+    if (!confirm("Stop buying and SELL every open coin now?")) return;
+    void withBusy(async () => {
+      const r = await api.sellAll();
       message = r.message;
     });
   });
@@ -1234,3 +1261,29 @@ setInterval(() => {
 
 // Warm alert cursor so first events after app open are caught.
 void pollSessionAlerts();
+
+/** Live wallet block: public address + SOL balance + caps. Never any key. */
+function liveRows(status: Record<string, unknown>): string {
+  const live = status.live as
+    | {
+        walletPublicKey?: string | null;
+        solBalance?: number | null;
+        buysHalted?: boolean;
+        todayRealizedUsd?: number;
+        dailyLossLimitHit?: boolean;
+        lastLiveError?: string | null;
+        caps?: { maxPositionUsd?: number; maxOpenPositions?: number; dailyLossLimitUsd?: number };
+      }
+    | null
+    | undefined;
+  if (!live) return "";
+  const pk = live.walletPublicKey ?? "—";
+  const short = pk.length > 12 ? `${pk.slice(0, 4)}…${pk.slice(-4)}` : pk;
+  return `
+      <div class="row"><span class="k">Wallet</span><span class="v">${escapeHtml(short)}</span></div>
+      <div class="row"><span class="k">SOL balance</span><span class="v">${typeof live.solBalance === "number" ? live.solBalance.toFixed(4) : "—"}</span></div>
+      <div class="row"><span class="k">Live caps</span><span class="v">$${live.caps?.maxPositionUsd ?? "?"}/trade · ${live.caps?.maxOpenPositions ?? "?"} open · −$${live.caps?.dailyLossLimitUsd ?? "?"}/day</span></div>
+      <div class="row"><span class="k">Today (live)</span><span class="v ${live.dailyLossLimitHit ? "warn-text" : ""}">$${(live.todayRealizedUsd ?? 0).toFixed(2)}${live.dailyLossLimitHit ? " · LIMIT HIT" : ""}</span></div>
+      ${live.buysHalted ? `<div class="row"><span class="k">Buys</span><span class="v warn-text">HALTED</span></div>` : ""}
+      ${live.lastLiveError ? `<div class="row"><span class="k">Live error</span><span class="v warn-text">${escapeHtml(live.lastLiveError)}</span></div>` : ""}`;
+}

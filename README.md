@@ -266,7 +266,7 @@ cd mobile/android
 ## What this is NOT
 
 - **Not** a guaranteed 5× (or any) return system  
-- **Not** live trading out of the box  
+- **Not** live trading out of the box (live is opt-in behind 3 gates + dry-run)  
 - **Not** MEV-aware, rug-proof, or tax software  
 - **Not** a place to paste private keys (`.gitignore` blocks key/wallet files)  
 - **Not** an on-phone trading engine — the APK is a remote control for the paper server  
@@ -280,7 +280,8 @@ src/
   market/pumpfun.ts   # Pump.fun frontend API (paper) + Dex fallback
   strategy/momentum.ts
   risk/manager.ts     # sizing + max trades + stop helper
-  broker/paper.ts     # sim fills (slippage/fees); live stub throws
+  broker/paper.ts     # sim fills (slippage/fees)
+  live/               # gated live path: mode gates, keypair file loader, PumpPortal tx, HTTPS send/confirm
   ledger/ledger.ts    # cash, positions, JSON/CSV
   engine/botEngine.ts # start/stop controllable runner
   api/server.ts       # Express control API (CORS for mobile)
@@ -313,18 +314,43 @@ config/pumpfun-preset.json
 3. **Fallback (default, labeled in logs):** DexScreener search filtered to `dexId` ∈ `{pumpfun, pumpswap}` if the frontend API fails or is empty.
 4. **Broker:** still `PaperBroker` — no wallet, no live Pump.fun/Jupiter swap.
 
-## Live wiring (stub only)
+## Going live (opt-in, gated — paper stays the default)
 
-Live mode **refuses to start** (`assertPaperOrStubLive`). API `POST /runner/start` also refuses unless `PAPER_MODE=true`. When you are ready *after* paper validation:
+Paper mode is the default and always will be. With **no new settings**, the bot
+behaves exactly as before. Live only turns on when **all three** of these are set:
+`PAPER_MODE=false`, `LIVE_TRADING_ENABLED=true`, and `LIVE_CONFIRM=I_UNDERSTAND`.
+If any one is missing, the bot runs **PAPER** and prints why.
 
-1. Keep keys **out of git** — load a keypair path from env (`LIVE_WALLET_KEYPAIR_PATH`), never commit it.  
-2. Replace `liveSwapStub` in `src/broker/paper.ts` with:
-   - **Jupiter** quote + swap API, or  
-   - **Raydium** / **PumpSwap** SDK swap helpers (Pump.fun bonding-curve buys are a separate integration — still not wired)  
-3. Add an RPC URL (`LIVE_RPC_URL`), confirm slippage/fee reality, and gate with an explicit `PAPER_MODE=false` + second confirmation flag.  
-4. Start tiny; assume fills, latency, and rugs are worse than paper.
+Even then it starts in **LIVE DRY-RUN**: it builds and *simulates* every trade on
+Solana but **never sends** one. Real sends need `LIVE_DRY_RUN=false` too.
 
-Until that exists, `PAPER_MODE=true` is the only supported path. The APK must not (and does not) require a wallet for paper.
+Technical details: [docs/live-trading.md](docs/live-trading.md).
+
+### Plain-language checklist (do these in order)
+
+1. **Make a brand-new wallet just for the bot.** Never use your main wallet.
+   On the laptop/Pi run: `solana-keygen new --outfile ~/bot-wallet.json`
+   (write the recovery words on paper; don't photograph them).
+2. **Lock the file so only you can read it:** `chmod 600 ~/bot-wallet.json`.
+   The bot refuses to go live if other users can read it. The file stays on
+   that machine only: never in the repo, chat, phone, or cloud.
+3. **Fund it small.** Send only the trading stake (about **$300 per paycheck**)
+   plus a little SOL for fees. Whatever is in this wallet is what you can lose.
+4. **Turn on dry-run.** In `.env` set:
+   `PAPER_MODE=false`, `LIVE_TRADING_ENABLED=true`, `LIVE_CONFIRM=I_UNDERSTAND`,
+   `LIVE_WALLET_KEYPAIR_PATH=/home/<you>/bot-wallet.json`, and leave
+   `LIVE_DRY_RUN=true`. Restart the bot. The phone shows a big orange
+   **LIVE DRY-RUN** banner.
+5. **Watch it for a day.** Trades show as `live_dry_run` in the journal. Nothing
+   is sent and no SOL moves. Look for errors on the Status tab.
+6. **Go live.** Change only `LIVE_DRY_RUN=false` and restart. The banner turns
+   red: **LIVE · REAL MONEY**. Defaults: $15 per trade, 1 coin at a time, stop
+   buying after −$30 in one day (resets at midnight ET), rug filter always on.
+
+**Emergency:** Stop on the phone (or `POST /runner/stop`) stops new buys right
+away. Coins already held keep their stop-loss / take-profit until they sell.
+Press Stop again to stop completely. **STOP + SELL ALL** (`POST /runner/sell-all`)
+sells everything now. To go back to paper, set `LIVE_TRADING_ENABLED=false` and restart.
 
 ## Risk reminder
 

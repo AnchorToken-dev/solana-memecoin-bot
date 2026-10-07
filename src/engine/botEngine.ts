@@ -59,6 +59,30 @@ import {
   exitEventType,
   exitTitle,
 } from "../alerts/sessionEvents.js";
+import { modeLabel, type TradingMode, type LiveSettings } from "../live/mode.js";
+import { LiveBroker } from "../live/liveBroker.js";
+import { loadLiveSigner } from "../live/keypair.js";
+import { HttpsLiveRpc } from "../live/rpc.js";
+import { PumpPortalBuilder } from "../live/pumpportal.js";
+import { redactSecrets } from "../live/redact.js";
+import { startOfDay } from "../journal/timezone.js";
+
+const ET_TZ = "America/New_York";
+
+export interface LiveStatus {
+  /** Public address only. Never the key or the key file path. */
+  walletPublicKey: string | null;
+  solBalance: number | null;
+  solBalanceAt: number | null;
+  dryRun: boolean;
+  buysHalted: boolean;
+  /** Realized PnL today (ET) for the current live mode. */
+  todayRealizedUsd: number;
+  dailyLossLimitHit: boolean;
+  caps: Pick<LiveSettings, "maxPositionUsd" | "maxOpenPositions" | "dailyLossLimitUsd" | "minSolReserve" | "slippageBps" | "sellMaxSlippageBps" | "priorityFeeSol" | "priorityFeeMaxSol">;
+  rugFilterMandatory: true;
+  lastLiveError: string | null;
+}
 
 export type RunnerState = "stopped" | "starting" | "running" | "stopping";
 
@@ -91,6 +115,12 @@ export interface EngineStatus {
    * When not configured, connected is false and state is disconnected.
    */
   solanaRpcWss: SolanaWsPublicStatus;
+  /** paper | live_dry_run | live */
+  tradingMode: TradingMode;
+  /** Big on-screen label: "PAPER" | "LIVE DRY-RUN" | "LIVE". */
+  modeLabel: "PAPER" | "LIVE DRY-RUN" | "LIVE";
+  /** Null in paper mode. */
+  live: LiveStatus | null;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -155,6 +185,15 @@ export class BotEngine {
   private readonly solanaRpcOverride: RugFilterRpc | null | undefined;
   /** Optional WSS listener. null = not configured / disabled. */
   private readonly solanaWs: ReadOnlySolanaWs | null;
+  /** Live broker (live modes only). Built lazily on start() unless injected. */
+  private liveBroker: LiveBroker | null;
+  /** Kill switch: no new buys; exits keep running. */
+  private buysHalted = false;
+  private liveSolBalance: number | null = null;
+  private liveSolBalanceAt: number | null = null;
+  private lastLiveError: string | null = null;
+  private dailyLossAlertDay: number | null = null;
+  private readonly sellFailAlerted = new Set<string>();
 
   constructor(
     cfg: BotConfig,
@@ -180,13 +219,21 @@ export class BotEngine {
        * null = force no WSS (tests).
        */
       solanaWs?: ReadOnlySolanaWs | null;
+      /** Live broker for tests. Ignored in paper mode. */
+      liveBroker?: LiveBroker | null;
     },
   ) {
     this.cfg = cfg;
     this.market = deps?.market ?? createMarketData(cfg);
     this.broker = deps?.broker ?? new PaperBroker(cfg);
+    // Live keeps its own session ledger so paper numbers never mix with real ones.
     this.ledger =
-      deps?.ledger ?? new PaperLedger(cfg.bankrollUsd, cfg.ledgerDir);
+      deps?.ledger ??
+      new PaperLedger(
+        cfg.bankrollUsd,
+        this.isLiveMode(cfg) ? join(cfg.ledgerDir, "live") : cfg.ledgerDir,
+      );
+    this.liveBroker = this.isLiveMode(cfg) ? (deps?.liveBroker ?? null) : null;
     this.journal =
       deps?.journal ?? new TradeJournal(cfg.ledgerDir);
     this.checklist =
@@ -253,7 +300,149 @@ export class BotEngine {
       solanaRpcWss: this.solanaWs
         ? this.solanaWs.getStatus()
         : emptySolanaWsStatus(),
+      tradingMode: this.tradingMode,
+      modeLabel: modeLabel(this.tradingMode),
+      live: this.liveStatus(),
     };
+  }
+
+  get tradingMode(): TradingMode {
+    return this.isLiveMode(this.cfg) ? this.cfg.tradingMode! : "paper";
+  }
+
+  private isLiveMode(cfg: BotConfig = this.cfg): boolean {
+    return (
+      !cfg.paperMode &&
+      (cfg.tradingMode === "live" || cfg.tradingMode === "live_dry_run") &&
+      cfg.live != null
+    );
+  }
+
+  private liveTodayRealized(): number {
+    return this.journal.realizedSince(startOfDay(Date.now(), ET_TZ), this.tradingMode);
+  }
+
+  private liveDailyLossHit(): boolean {
+    const live = this.cfg.live;
+    if (!live) return false;
+    return this.liveTodayRealized() <= -live.dailyLossLimitUsd;
+  }
+
+  private liveStatus(): LiveStatus | null {
+    const live = this.cfg.live;
+    if (!this.isLiveMode() || !live) return null;
+    return {
+      walletPublicKey: this.liveBroker?.publicKey ?? null,
+      solBalance: this.liveSolBalance,
+      solBalanceAt: this.liveSolBalanceAt,
+      dryRun: this.tradingMode === "live_dry_run",
+      buysHalted: this.buysHalted,
+      todayRealizedUsd: this.liveTodayRealized(),
+      dailyLossLimitHit: this.liveDailyLossHit(),
+      caps: {
+        maxPositionUsd: live.maxPositionUsd,
+        maxOpenPositions: live.maxOpenPositions,
+        dailyLossLimitUsd: live.dailyLossLimitUsd,
+        minSolReserve: live.minSolReserve,
+        slippageBps: live.slippageBps,
+        sellMaxSlippageBps: live.sellMaxSlippageBps,
+        priorityFeeSol: live.priorityFeeSol,
+        priorityFeeMaxSol: live.priorityFeeMaxSol,
+      },
+      rugFilterMandatory: true,
+      lastLiveError: this.lastLiveError,
+    };
+  }
+
+  /** Build the live broker from env (keypair file + HTTPS RPC). Never logs secrets. */
+  private ensureLiveBroker(): { ok: true; broker: LiveBroker } | { ok: false; message: string } {
+    if (this.liveBroker) return { ok: true, broker: this.liveBroker };
+    const live = this.cfg.live;
+    if (!live) return { ok: false, message: "Live settings missing" };
+    const signer = loadLiveSigner();
+    if (!signer.ok) return { ok: false, message: `Refusing to start LIVE: ${signer.error}` };
+    const rpc = HttpsLiveRpc.fromEnv();
+    if (!rpc) return { ok: false, message: "Refusing to start LIVE: SOLANA_RPC_URL is not set" };
+    this.liveBroker = new LiveBroker({
+      signer: signer.signer,
+      rpc,
+      builder: new PumpPortalBuilder(),
+      settings: live,
+      mode: this.tradingMode === "live" ? "live" : "live_dry_run",
+    });
+    return { ok: true, broker: this.liveBroker };
+  }
+
+  private async refreshLiveBalance(): Promise<void> {
+    if (!this.liveBroker) return;
+    try {
+      this.liveSolBalance = await this.liveBroker.getSolBalance();
+      this.liveSolBalanceAt = Date.now();
+    } catch (err) {
+      this.lastLiveError = redactSecrets(err);
+    }
+  }
+
+  private async liveSolUsd(): Promise<number | null> {
+    return this.resolveQuoteUsdRate();
+  }
+
+  /**
+   * Close one position through the right broker. Paper = identical to main.
+   * Live: on failure the position STAYS open (retried next tick) and we alert loudly.
+   */
+  private async closePosition(
+    pos: Position,
+    markPrice: number,
+    reason: import("../types.js").ExitReason,
+  ): Promise<Fill | null> {
+    if (!this.isLiveMode() || !this.liveBroker) {
+      const { fill, proceedsUsd, realizedPnlUsd } = this.broker.applySell({
+        position: pos,
+        markPrice,
+        reason,
+      });
+      this.ledger.recordSell(fill, realizedPnlUsd, proceedsUsd);
+      await this.recordJournalClose(pos, fill, realizedPnlUsd);
+      return fill;
+    }
+    const solUsd = await this.liveSolUsd();
+    if (solUsd == null) {
+      this.liveSellFailed(pos, "no SOL/USD rate — cannot value the sell; will retry");
+      return null;
+    }
+    const res = await this.liveBroker.sell({ position: pos, markPrice, reason, solUsd });
+    if (!res.ok) {
+      this.liveSellFailed(pos, `${res.attempts} attempt(s): ${res.errors.join(" | ")}`);
+      return null;
+    }
+    this.sellFailAlerted.delete(pos.id);
+    this.ledger.recordSell(res.fill, res.realizedPnlUsd, res.proceedsUsd);
+    const note = res.notes.length > 0 ? redactSecrets(res.notes.join(" | ")).slice(0, 400) : undefined;
+    await this.recordJournalClose(pos, res.fill, res.realizedPnlUsd, note);
+    void this.refreshLiveBalance();
+    return res.fill;
+  }
+
+  private liveSellFailed(pos: Position, detail: string): void {
+    const msg = redactSecrets(detail).slice(0, 500);
+    this.lastLiveError = `SELL FAILED ${pos.symbol}: ${msg}`;
+    log.error(`LIVE SELL FAILED ${pos.symbol} (${pos.mint}) — position still open: ${msg}`);
+    // Loud, but not one alert every 3s: once per position until it clears.
+    if (!this.sellFailAlerted.has(pos.id)) {
+      this.sellFailAlerted.add(pos.id);
+      this.events.push(
+        "live_sell_failed",
+        "⚠️ LIVE SELL FAILED",
+        `${pos.symbol}: could not sell after retries. Still holding. Bot keeps retrying — check the wallet. ${msg}`,
+        { symbol: pos.symbol, mint: pos.mint, positionId: pos.id },
+      );
+      try {
+        this.journal.appendEvent({ kind: "live_sell_failed", symbol: pos.symbol, mint: pos.mint, detail: msg });
+      } catch {
+        /* never let journaling break exits */
+      }
+    }
   }
 
   /** Absolute path of data/pinned-mint.json (or the ledger dir equivalent). */
@@ -576,7 +765,11 @@ export class BotEngine {
     return this.ledger.getTrades(limit);
   }
 
-  async getJournal(opts?: { limit?: number; offset?: number }) {
+  getLiveEvents() {
+    return this.journal.listEvents();
+  }
+
+  async getJournal(opts?: { limit?: number; offset?: number; mode?: import("../journal/journal.js").JournalModeFilter }) {
     const estimateQuoteUsdRate = await this.resolveQuoteUsdRate();
     return this.journal.list({
       ...opts,
@@ -822,6 +1015,7 @@ export class BotEngine {
     position: Position,
     fill: Fill,
     realizedPnlUsd: number,
+    note?: string,
   ): Promise<JournalEntry> {
     const quoteUsdRate = await this.resolveQuoteUsdRate();
     // Snapshot latest research checklist for this mint (learning link).
@@ -839,6 +1033,9 @@ export class BotEngine {
       checklistId: cl?.id ?? null,
       checklistVerdict: cl?.verdict ?? null,
       checklistThesis: cl?.thesis ?? null,
+      mode: fill.mode ?? "paper",
+      signature: fill.signature ?? null,
+      ...(note ? { note } : {}),
     });
     const reason = fill.reason ?? "unknown";
     const pnlSign = realizedPnlUsd >= 0 ? "+" : "";
@@ -867,14 +1064,26 @@ export class BotEngine {
   async start(opts?: {
     reset?: boolean;
   }): Promise<{ ok: boolean; message: string; status: EngineStatus }> {
-    if (!this.cfg.paperMode) {
+    if (!this.cfg.paperMode && !this.isLiveMode()) {
       return {
         ok: false,
         message:
-          "Refusing to start: PAPER_MODE is false. Live trading is stubbed; keep PAPER_MODE=true.",
+          "Refusing to start: PAPER_MODE is false but the live gates did not all pass.",
         status: this.getStatus(),
       };
     }
+    if (this.isLiveMode()) {
+      if (opts?.reset) {
+        return { ok: false, message: "Reset is paper-only; refusing to start LIVE with reset", status: this.getStatus() };
+      }
+      const b = this.ensureLiveBroker();
+      if (!b.ok) {
+        this.lastLiveError = b.message;
+        return { ok: false, message: b.message, status: this.getStatus() };
+      }
+      await this.refreshLiveBalance();
+    }
+    this.buysHalted = false;
     if (opts?.reset) {
       const cleared = await this.reset();
       if (!cleared.ok) {
@@ -923,21 +1132,58 @@ export class BotEngine {
       this.loopPromise = null;
     });
 
-    log.info("Paper runner started via engine");
+    const label = modeLabel(this.tradingMode);
+    log.info(`${label} runner started via engine`);
     this.events.push(
       "bot_started",
-      "Paper bot started",
+      this.isLiveMode() ? `${label} bot started` : "Paper bot started",
       `Runner running · bankroll $${this.cfg.bankrollUsd.toFixed(2)}`,
       { bankrollUsd: this.cfg.bankrollUsd },
     );
     return {
       ok: true,
-      message: "Paper runner started",
+      message: this.isLiveMode() ? `${label} runner started` : "Paper runner started",
       status: this.getStatus(),
     };
   }
 
+  /**
+   * Live kill switch / sell-all: halt buys immediately, then market-sell every
+   * open position (same retry ladder as normal exits).
+   */
+  async sellAll(): Promise<{ ok: boolean; message: string; status: EngineStatus; portfolio: PortfolioSnapshot; fills?: Fill[] }> {
+    this.buysHalted = true;
+    if (this.ledger.openPositions.length === 0) {
+      return { ok: true, message: "Buys halted. No open positions to sell.", status: this.getStatus(), portfolio: await this.getPortfolio() };
+    }
+    return this.exitNow();
+  }
+
   async stop(): Promise<{ ok: boolean; message: string; status: EngineStatus }> {
+    // LIVE kill switch: halt new buys at once. If coins are still held, keep
+    // the loop alive so stops/TP/trail still protect them; it exits by itself
+    // once flat. A second stop while halted forces a full stop.
+    if (
+      this.isLiveMode() &&
+      (this.state === "running" || this.state === "starting") &&
+      !this.buysHalted &&
+      this.ledger.openPositions.length > 0
+    ) {
+      this.buysHalted = true;
+      log.warn("LIVE kill switch: new buys halted; still managing open positions");
+      this.events.push(
+        "bot_stopped",
+        "LIVE buys halted",
+        `No new buys. Still managing ${this.ledger.openPositions.length} open position(s) until they exit. Press Stop again to stop fully, or Sell all.`,
+        { buysHalted: true },
+      );
+      return {
+        ok: true,
+        message: `New buys halted. Still managing ${this.ledger.openPositions.length} open position(s); POST /runner/stop again to stop fully or POST /runner/sell-all to flatten now.`,
+        status: this.getStatus(),
+      };
+    }
+    this.buysHalted = true;
     if (this.state === "stopped") {
       return {
         ok: true,
@@ -967,7 +1213,7 @@ export class BotEngine {
         this.stoppedAt = Date.now();
       }
     }
-    log.info("Paper runner stopped via engine");
+    log.info(`${modeLabel(this.tradingMode)} runner stopped via engine`);
     const reason = this.stopReason ?? "manual_stop";
     if (String(reason).startsWith("chase_lockout")) {
       const lock = this.chaseLockout.getStatus();
@@ -1064,7 +1310,7 @@ export class BotEngine {
     portfolio: PortfolioSnapshot;
     fills?: Fill[];
   }> {
-    if (!this.cfg.paperMode) {
+    if (!this.cfg.paperMode && !this.isLiveMode()) {
       const portfolio = await this.getPortfolio();
       return {
         ok: false,
@@ -1110,19 +1356,22 @@ export class BotEngine {
           };
         }
       }
-      const { fill, proceedsUsd, realizedPnlUsd } = this.broker.applySell({
-        position: pos,
-        markPrice: mark,
-        reason: "manual_exit",
-      });
-      this.ledger.recordSell(fill, realizedPnlUsd, proceedsUsd);
-      await this.recordJournalClose(pos, fill, realizedPnlUsd);
+      const fill = await this.closePosition(pos, mark, "manual_exit");
+      if (!fill) {
+        const portfolio = await this.getPortfolio();
+        return {
+          ok: false,
+          message: `LIVE sell failed for ${pos.symbol}; position still open (see /alerts). ${this.lastLiveError ?? ""}`,
+          status: this.getStatus(),
+          portfolio,
+          fills,
+        };
+      }
       fills.push(fill);
-      log.info("Manual paper exit", {
+      log.info(this.isLiveMode() ? "Manual live exit" : "Manual paper exit", {
         symbol: pos.symbol,
         mark,
-        realizedPnlUsd,
-        proceedsUsd,
+        notionalUsd: fill.notionalUsd,
       });
     }
 
@@ -1334,14 +1583,17 @@ export class BotEngine {
         if (!ledger.openPositions.some((p) => p.id === updated.id)) {
           continue;
         }
-        const { fill, proceedsUsd, realizedPnlUsd } = broker.applySell({
-          position: updated,
-          markPrice: exit.markPrice,
-          reason: exit.reason,
-        });
-        ledger.recordSell(fill, realizedPnlUsd, proceedsUsd);
-        await this.recordJournalClose(updated, fill, realizedPnlUsd);
+        await this.closePosition(updated, exit.markPrice, exit.reason);
       }
+    }
+
+    if (this.isLiveMode() && this.buysHalted) {
+      if (ledger.openPositions.length === 0) {
+        this.stopReason = this.stopReason ?? "manual_stop";
+        log.warn("LIVE: buys halted and flat — stopping runner");
+        return true;
+      }
+      return false;
     }
 
     const lockTick = this.maybeEngageChaseLockout();
@@ -1362,6 +1614,24 @@ export class BotEngine {
     if (!canOpenAnother(ledger.openPositions.length, cfg)) {
       log.debug(`Cycle ${cycle}: at max open trades (skipped entry scan)`);
       return false;
+    }
+    if (this.isLiveMode() && cfg.live) {
+      if (ledger.openPositions.length >= cfg.live.maxOpenPositions) {
+        log.debug(`Cycle ${cycle}: at LIVE_MAX_OPEN_POSITIONS`);
+        return false;
+      }
+      if (this.liveDailyLossHit()) {
+        const day = startOfDay(now, ET_TZ);
+        if (this.dailyLossAlertDay !== day) {
+          this.dailyLossAlertDay = day;
+          const msg = `LIVE daily loss limit hit (today $${this.liveTodayRealized().toFixed(2)} ≤ −$${cfg.live.dailyLossLimitUsd}). No new buys until tomorrow (ET). Open positions still managed.`;
+          log.warn(msg);
+          this.events.push("daily_loss_cap", "LIVE daily loss limit hit", msg, {
+            todayRealizedUsd: this.liveTodayRealized(),
+          });
+        }
+        return false;
+      }
     }
 
     const snaps = await this.selectEntrySnapshots();
@@ -1412,7 +1682,7 @@ export class BotEngine {
       return false;
     }
 
-    if (cfg.rugFilterEnabled === true) {
+    if (cfg.rugFilterEnabled === true || this.isLiveMode()) {
       const rpc =
         this.solanaRpcOverride !== undefined
           ? this.solanaRpcOverride
@@ -1433,7 +1703,12 @@ export class BotEngine {
             timestamp: Date.now(),
           };
         decision = await runRugFilter(
-          rugFilterInputFromConfig(cfg, snap, rpc),
+          // Live: filter is mandatory regardless of the paper toggle.
+          rugFilterInputFromConfig(
+            this.isLiveMode() ? { ...cfg, rugFilterEnabled: true } : cfg,
+            snap,
+            rpc,
+          ),
         );
       } catch (err) {
         log.warn(
@@ -1455,12 +1730,49 @@ export class BotEngine {
       }
     }
 
-    const { fill, position } = broker.applyBuy({
-      mint: entry.mint,
-      symbol: entry.symbol,
-      markPrice: entry.priceUsd,
-      notionalUsd: sized.notionalUsd,
-    });
+    let fill: Fill;
+    let position: Position;
+    if (this.isLiveMode() && this.liveBroker && cfg.live) {
+      if (this.buysHalted) return false;
+      const solUsd = await this.liveSolUsd();
+      if (solUsd == null) {
+        log.warn(`Skip LIVE entry ${entry.symbol}: no SOL/USD rate`);
+        return false;
+      }
+      const res = await this.liveBroker.buy({
+        mint: entry.mint,
+        symbol: entry.symbol,
+        markPrice: entry.priceUsd,
+        notionalUsd: Math.min(sized.notionalUsd, cfg.live.maxPositionUsd),
+        solUsd,
+      });
+      if (!res.ok) {
+        // No position recorded → no ghost. Loud only when the chain state is unknown.
+        const msg = redactSecrets(res.reason).slice(0, 400);
+        this.lastLiveError = `BUY ${entry.symbol}: ${msg}`;
+        log.warn(`LIVE buy not filled for ${entry.symbol}: ${msg}`);
+        if (res.unconfirmed) {
+          this.events.push(
+            "live_buy_unconfirmed",
+            "⚠️ LIVE BUY UNCONFIRMED",
+            `${entry.symbol}: sent but not confirmed. Not tracked as a position. Check the wallet / explorer. ${msg}`,
+            { symbol: entry.symbol, mint: entry.mint, signature: res.signature ?? null },
+          );
+          this.journal.appendEvent({ kind: "live_buy_unconfirmed", symbol: entry.symbol, mint: entry.mint, detail: msg, signature: res.signature ?? null });
+        }
+        return false;
+      }
+      fill = res.fill;
+      position = res.position;
+      void this.refreshLiveBalance();
+    } else {
+      ({ fill, position } = broker.applyBuy({
+        mint: entry.mint,
+        symbol: entry.symbol,
+        markPrice: entry.priceUsd,
+        notionalUsd: sized.notionalUsd,
+      }));
+    }
     ledger.recordBuy(fill, position);
     log.info(`Entry signal: ${entry.reason}`);
     this.events.push(

@@ -4,6 +4,8 @@
  *
  * Writes that start trading require PAPER_MODE=true.
  */
+import { redactSecrets } from "../live/redact.js";
+import { isJournalModeFilter } from "../journal/journal.js";
 import express from "express";
 import cors from "cors";
 import type { BotEngine } from "../engine/botEngine.js";
@@ -30,6 +32,7 @@ export function createControlApp(engine: BotEngine) {
       ok: true,
       service: "solana-memecoin-bot-control",
       paperMode: engine.cfg.paperMode,
+      tradingMode: engine.tradingMode,
       ts: Date.now(),
     });
   });
@@ -235,7 +238,7 @@ export function createControlApp(engine: BotEngine) {
   });
 
   app.post("/runner/start", async (req, res) => {
-    if (!engine.cfg.paperMode) {
+    if (!engine.cfg.paperMode && engine.tradingMode === "paper") {
       res.status(403).json({
         ok: false,
         message:
@@ -292,7 +295,7 @@ export function createControlApp(engine: BotEngine) {
     _req: express.Request,
     res: express.Response,
   ): Promise<void> => {
-    if (!engine.cfg.paperMode) {
+    if (!engine.cfg.paperMode && engine.tradingMode === "paper") {
       const portfolio = await engine.getPortfolio();
       res.status(403).json({
         ok: false,
@@ -311,6 +314,20 @@ export function createControlApp(engine: BotEngine) {
     res.status(200).json(result);
   };
   app.post("/runner/exit", exitHandler);
+
+  /**
+   * Kill switch + flatten: halt new buys, then sell every open position
+   * (live: real sells with the retry ladder; paper: paper fills).
+   */
+  app.post("/runner/sell-all", async (_req, res) => {
+    const result = await engine.sellAll();
+    res.status(result.ok ? 200 : 400).json(result);
+  });
+
+  /** Live problem log (failed sells / unconfirmed buys). Never contains keys. */
+  app.get("/live/events", (_req, res) => {
+    res.json({ events: engine.getLiveEvents() });
+  });
   app.post("/position/exit", exitHandler);
 
   /**
@@ -412,7 +429,10 @@ export function createControlApp(engine: BotEngine) {
         ? Math.max(0, Math.floor(offsetRaw))
         : 0;
       // Includes Daily/Weekly/Monthly/Overall P&L summary (USD + quote asset).
-      res.json(await engine.getJournal({ limit, offset }));
+      // ?mode=paper|live_dry_run|live|all (default all) filters rows + P&L summary.
+      const modeQ = req.query.mode;
+      const mode = isJournalModeFilter(modeQ) ? modeQ : undefined;
+      res.json(await engine.getJournal({ limit, offset, mode }));
     } catch (err) {
       next(err);
     }
@@ -466,6 +486,13 @@ export function createControlApp(engine: BotEngine) {
       res.status(500).json({
         error: err instanceof Error ? err.message : String(err),
       });
+    },
+  );
+
+  // Last-resort error handler: never leak stacks, RPC URLs, or key material.
+  app.use(
+    (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      res.status(500).json({ ok: false, message: redactSecrets(err).slice(0, 300) });
     },
   );
 

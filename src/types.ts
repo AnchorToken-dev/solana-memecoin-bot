@@ -1,4 +1,6 @@
 /** Shared domain types for the paper momentum bot. */
+import type { LiveSettings, TradingMode } from "./live/mode.js";
+export type { TradingMode } from "./live/mode.js";
 
 export interface MomentumParams {
   minPct: number;
@@ -108,6 +110,13 @@ export interface BotConfig {
    * Default 3. Exactly this many is allowed.
    */
   rugFilterMaxSameSlotBuys?: number;
+  /**
+   * Resolved trading mode. Absent / "paper" = today's behaviour.
+   * Set by loadConfig from the live gates (see src/live/mode.ts).
+   */
+  tradingMode?: TradingMode;
+  /** Live hard caps (env only, never PATCH-able). Present only in live modes. */
+  live?: LiveSettings;
 }
 
 export interface TokenSnapshot {
@@ -174,7 +183,12 @@ export interface Fill {
   slippageUsd: number;
   reason?: ExitReason;
   timestamp: number;
-  paper: true;
+  /** true for paper fills; false for live / live dry-run fills. */
+  paper: boolean;
+  /** Absent on old rows = paper. */
+  mode?: TradingMode;
+  /** On-chain tx signature (live sends only). */
+  signature?: string | null;
 }
 
 export interface TradeRecord {
