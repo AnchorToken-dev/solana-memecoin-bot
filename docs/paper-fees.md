@@ -55,6 +55,14 @@ Versus the old model's ≈ $0.24, that is roughly **$0.55–0.90 less P&L per
 trade** (about $0.65–0.70 typical; more on thin pools and on winners, since
 percentage fees are charged on a bigger sale).
 
+## LIVE DRY-RUN uses this model too
+
+Practice mode (`LIVE_DRY_RUN=true`) estimates its costs with exactly this model
+(rent on each buy, venue fee tier, size-aware slippage, priority fee from
+`LIVE_PRIORITY_FEE_SOL`). `PAPER_FEE_MODEL=legacy` puts dry-run back on its old
+estimate too. Real live trades use the actual wallet SOL delta. See
+[live-trading.md](live-trading.md#dry-run-costs-same-model-as-paper).
+
 ## Switches
 
 * `PAPER_FEE_MODEL=legacy` — old flat model (`FEE_BPS` + `SLIPPAGE_BPS`), for
