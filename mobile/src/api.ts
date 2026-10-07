@@ -55,6 +55,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ usd }),
     }),
+  sweepVault: () =>
+    request<{ ok: boolean; message: string }>("/vault/sweep", { method: "POST" }),
   sellAll: () =>
     request<{ ok: boolean; message: string }>("/runner/sell-all", { method: "POST" }),
   status: () => request<Record<string, unknown>>("/status"),

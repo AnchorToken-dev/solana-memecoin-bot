@@ -34,6 +34,9 @@ export interface LiveRpc {
   send(txBase64: string): Promise<string>;
   getSignatureStatus(sig: string): Promise<SignatureStatus | null>;
   getTransactionMeta(sig: string): Promise<{ meta: TxMeta; accountKeys: string[] } | null>;
+  /** Optional (vault sweep): recent blockhash + its expiry height. */
+  getLatestBlockhash?(): Promise<{ blockhash: string; lastValidBlockHeight: number }>;
+  getBlockHeight?(): Promise<number>;
 }
 
 export class HttpsLiveRpc implements LiveRpc {
@@ -96,6 +99,17 @@ export class HttpsLiveRpc implements LiveRpc {
       { searchTransactionHistory: true },
     ]);
     return r.value[0] ?? null;
+  }
+
+  async getLatestBlockhash() {
+    const r = await this.call<{ value: { blockhash: string; lastValidBlockHeight: number } }>("getLatestBlockhash", [
+      { commitment: "confirmed" },
+    ]);
+    return r.value;
+  }
+
+  async getBlockHeight(): Promise<number> {
+    return this.call<number>("getBlockHeight", [{ commitment: "confirmed" }]);
   }
 
   async getTransactionMeta(sig: string) {

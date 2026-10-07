@@ -104,3 +104,22 @@ be noticeably worse than paper before any slippage. Consider raising paper
   lockedUntil, warnings), and on the phone in large text.
 - Paper's old session cap (`DAILY_LOSS_USD`, which stops the runner and is cleared by Reset) is unchanged
   and still separate.
+
+## Vault sweep (LIVE only)
+
+- `LIVE_VAULT_ADDRESS` = **public** address of a separate vault wallet. It must be valid base58, 32 bytes, not the
+  bot wallet and not the system program. Invalid → live refuses to start. Unset → bookkeeping-only vault with a
+  warning. It is read once at startup with no setter. `POST /vault/skim` and `POST /vault/sweep` ignore any
+  address in the body. `/status.vaultSweep` shows it masked (`ABCD…WXYZ`).
+- Skim in LIVE → the USD amount is converted to SOL at the current rate and queued. With `LIVE_VAULT_AUTO_SWEEP`
+  (default true) it's sent right away; the phone's **Sweep vault now** (`POST /vault/sweep`) sends on demand.
+- Plain SystemProgram transfer, built and signed locally, simulated, then sent and confirmed over HTTPS.
+  It keeps `LIVE_MIN_SOL_RESERVE` + the fee in the bot wallet and skips totals below `LIVE_VAULT_MIN_SWEEP_SOL`.
+- **No double-send:** the signed tx and its signature are saved as `pending` in `data/live/vault-sweeps.json`
+  *before* sending. Retries and restarts look up that signature first and only rebroadcast the same bytes.
+  A new tx is built only after the old one failed on-chain or its blockhash expired unseen.
+  After `LIVE_VAULT_MAX_ATTEMPTS` failures sweeps pause, with a loud `/alerts` event; the owed SOL stays tracked.
+  An unreadable state file pauses sweeps.
+- Every sweep (confirmed / simulated / failed) is written to `data/live-events.json` with its signature.
+- DRY-RUN: simulated only, never sent. PAPER: unchanged (bookkeeping vault, `/vault/return` still works;
+  in live `/vault/return` stays refused).

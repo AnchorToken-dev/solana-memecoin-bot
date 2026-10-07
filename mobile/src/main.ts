@@ -287,6 +287,7 @@ async function paintControl(main: Element) {
     </div>
     ${hardLossCard(status)}
     ${tradeSizeCard(status)}
+    ${vaultSweepCard(status)}
     ${pinCard(status)}`;
   main.querySelectorAll("button[data-size]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -302,6 +303,12 @@ async function paintControl(main: Element) {
     void withBusy(async () => {
       await onStartRequestAlerts();
       const r = await api.start();
+      message = r.message;
+    });
+  });
+  main.querySelector("#sweepVault")?.addEventListener("click", () => {
+    void withBusy(async () => {
+      const r = await api.sweepVault();
       message = r.message;
     });
   });
@@ -1294,6 +1301,7 @@ function liveRows(status: Record<string, unknown>): string {
   const short = pk.length > 12 ? `${pk.slice(0, 4)}…${pk.slice(-4)}` : pk;
   return `
       <div class="row"><span class="k">Wallet</span><span class="v">${escapeHtml(short)}</span></div>
+      ${(() => { const v = status.vaultSweep as { addressMasked?: string | null; warning?: string | null } | null | undefined; return v ? `<div class="row"><span class="k">Vault</span><span class="v">${escapeHtml(v.addressMasked ?? v.warning ?? "—")}</span></div>` : ""; })()}
       <div class="row"><span class="k">SOL balance</span><span class="v">${typeof live.solBalance === "number" ? live.solBalance.toFixed(4) : "—"}</span></div>
       <div class="row"><span class="k">Live caps</span><span class="v">$${live.caps?.maxPositionUsd ?? "?"}/trade · ${live.caps?.maxOpenPositions ?? "?"} open · −$${live.caps?.dailyLossLimitUsd ?? "?"}/day</span></div>
       <div class="row"><span class="k">Today (live)</span><span class="v ${live.dailyLossLimitHit ? "warn-text" : ""}">$${(live.todayRealizedUsd ?? 0).toFixed(2)}${live.dailyLossLimitHit ? " · LIMIT HIT" : ""}</span></div>
@@ -1347,5 +1355,28 @@ function hardLossCard(status: Record<string, unknown>): string {
         <div><div class="hl-k">Room left</div><div class="hl-v">$${h.remainingUsd.toFixed(2)}</div></div>
       </div>
       ${(h.warnings ?? []).map((w) => `<p class="warn-text">${escapeHtml(w)}</p>`).join("")}
+    </div>`;
+}
+
+/** Live vault sweep: masked address + big "Sweep vault now". Destination is set in .env only. */
+function vaultSweepCard(status: Record<string, unknown>): string {
+  const v = status.vaultSweep as
+    | { configured: boolean; addressMasked: string | null; owedSol: number; minSweepSol: number; autoSweep: boolean; pending: { sol: number } | null; stuck: boolean; lastError: string | null; warning: string | null }
+    | null
+    | undefined;
+  if (!v) return "";
+  if (!v.configured) {
+    return `<div class="card"><h2>Vault wallet</h2><p class="warn-text">${escapeHtml(v.warning ?? "Not set")}</p></div>`;
+  }
+  return `
+    <div class="card vault-card">
+      <h2>Vault wallet</h2>
+      <div class="vault-addr">${escapeHtml(v.addressMasked ?? "")}</div>
+      <div class="row"><span class="k">Waiting to sweep</span><span class="v">${v.owedSol.toFixed(4)} SOL</span></div>
+      <div class="row"><span class="k">Auto-sweep</span><span class="v">${v.autoSweep ? "on" : "off"} · min ${v.minSweepSol} SOL</span></div>
+      ${v.pending ? `<div class="row"><span class="k">Pending</span><span class="v">${v.pending.sol.toFixed(4)} SOL confirming…</span></div>` : ""}
+      ${v.stuck ? `<p class="warn-text">⚠️ Sweeps failing — paused. ${escapeHtml(v.lastError ?? "")}</p>` : ""}
+      <button class="sweep-btn" id="sweepVault" ${busy ? "disabled" : ""}>Sweep vault now</button>
+      <p class="muted">Sends only to the address in .env on the laptop. Change it there and restart.</p>
     </div>`;
 }

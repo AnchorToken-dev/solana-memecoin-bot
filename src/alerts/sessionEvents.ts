@@ -16,7 +16,9 @@ export type SessionEventType =
   | "exit_time"
   | "exit_other"
   | "live_sell_failed"
-  | "live_buy_unconfirmed";
+  | "live_buy_unconfirmed"
+  | "vault_sweep"
+  | "vault_sweep_failed";
 
 export interface SessionEvent {
   id: string;

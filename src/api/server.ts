@@ -209,8 +209,8 @@ export function createControlApp(engine: BotEngine) {
    * percentOfProfit skims % of max(0, cash − bankrollUsd).
    * Vault survives /runner/reset.
    */
-  app.post("/vault/skim", (req, res) => {
-    if (!engine.cfg.paperMode) {
+  app.post("/vault/skim", async (req, res) => {
+    if (!engine.cfg.paperMode && engine.tradingMode === "paper") {
       res.status(403).json({
         ok: false,
         message:
@@ -219,7 +219,9 @@ export function createControlApp(engine: BotEngine) {
       });
       return;
     }
-    const result = engine.skimToVault(req.body);
+    // Live: also queues a SOL sweep to the env-locked LIVE_VAULT_ADDRESS.
+    // Any destination in the body is ignored.
+    const result = await engine.skimAndSweep(req.body);
     res.status(result.ok ? 200 : 400).json(result);
   });
 
@@ -227,6 +229,15 @@ export function createControlApp(engine: BotEngine) {
    * Return vault → tradable cash (paper convenience).
    * Body: { "amountUsd": number }
    */
+  /**
+   * LIVE: sweep owed vault SOL now. The destination is fixed by LIVE_VAULT_ADDRESS
+   * in .env; the request body is ignored entirely.
+   */
+  app.post("/vault/sweep", async (_req, res) => {
+    const r = await engine.sweepVaultNow();
+    res.status(r.ok ? 200 : 400).json(r);
+  });
+
   app.post("/vault/return", (req, res) => {
     if (!engine.cfg.paperMode) {
       res.status(403).json({

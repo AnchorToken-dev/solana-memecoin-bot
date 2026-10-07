@@ -64,6 +64,15 @@ import { LiveBroker } from "../live/liveBroker.js";
 import { loadLiveSigner } from "../live/keypair.js";
 import { HttpsLiveRpc } from "../live/rpc.js";
 import { PumpPortalBuilder } from "../live/pumpportal.js";
+import {
+  VaultSweeper,
+  validateVaultAddress,
+  loadVaultSweepSettings,
+  LIVE_VAULT_ADDRESS_ENV,
+  type VaultSweepStatus,
+} from "../live/vaultSweep.js";
+import type { LiveSigner } from "../live/keypair.js";
+import type { LiveRpc } from "../live/rpc.js";
 import { redactSecrets } from "../live/redact.js";
 import { startOfDay } from "../journal/timezone.js";
 import {
@@ -137,6 +146,8 @@ export interface EngineStatus {
   tradeSize: TradeSizeStatus;
   /** HARD daily loss limit (cannot be disabled; $300 ceiling). */
   hardDailyLoss: HardDailyLossStatus;
+  /** Live vault sweep (null in paper). Address shown masked only. */
+  vaultSweep: VaultSweepStatus | null;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -213,6 +224,11 @@ export class BotEngine {
   readonly hardLossStore: HardDailyLossStore;
   /** Last seen marks for open positions (unrealized loss for the hard limit). */
   private readonly lastMarks = new Map<string, number>();
+  private vaultSweeper: VaultSweeper | null = null;
+  /** Invalid LIVE_VAULT_ADDRESS → refuse to start live. */
+  private vaultError: string | null = null;
+  private vaultWarning: string | null = null;
+  private lastVaultCheckAt = 0;
 
   constructor(
     cfg: BotConfig,
@@ -242,6 +258,8 @@ export class BotEngine {
       liveBroker?: LiveBroker | null;
       /** Hard daily loss store (tests inject a clock). */
       hardLossStore?: HardDailyLossStore;
+      /** Live vault sweep wiring for tests (signer + rpc; destination still from env). */
+      vaultDeps?: { signer: LiveSigner; rpc: LiveRpc; env?: Record<string, string | undefined>; sleep?: (ms: number) => Promise<void> };
     },
   ) {
     this.cfg = cfg;
@@ -257,6 +275,10 @@ export class BotEngine {
     this.liveBroker = this.isLiveMode(cfg) ? (deps?.liveBroker ?? null) : null;
     this.tradeSizeStore = new TradeSizeStore(cfg.ledgerDir);
     this.hardLossStore = deps?.hardLossStore ?? new HardDailyLossStore(cfg.ledgerDir);
+    if (this.isLiveMode(cfg) && deps?.vaultDeps) {
+      const r = this.setupVault(deps.vaultDeps.signer, deps.vaultDeps.rpc, deps.vaultDeps.env ?? process.env, deps.vaultDeps.sleep);
+      if (!r.ok) this.vaultError = r.message;
+    }
     this.journal =
       deps?.journal ?? new TradeJournal(cfg.ledgerDir);
     this.checklist =
@@ -328,7 +350,91 @@ export class BotEngine {
       live: this.liveStatus(),
       tradeSize: this.getTradeSize(),
       hardDailyLoss: this.getHardDailyLoss(),
+      vaultSweep: this.getVaultSweepStatus(),
     };
+  }
+
+  /**
+   * Wire the vault sweeper. Destination comes ONLY from env (LIVE_VAULT_ADDRESS),
+   * read here once. There is no other way to set it.
+   */
+  private setupVault(
+    signer: LiveSigner,
+    rpc: LiveRpc,
+    env: Record<string, string | undefined>,
+    sleep?: (ms: number) => Promise<void>,
+  ): { ok: true } | { ok: false; message: string } {
+    const live = this.cfg.live;
+    if (!live) return { ok: true };
+    const raw = env[LIVE_VAULT_ADDRESS_ENV];
+    if (!raw || !raw.trim()) {
+      this.vaultSweeper = null;
+      this.vaultWarning = `${LIVE_VAULT_ADDRESS_ENV} not set — vault is bookkeeping only (no SOL is moved)`;
+      log.warn(this.vaultWarning);
+      return { ok: true };
+    }
+    const v = validateVaultAddress(raw, signer.publicKey);
+    if (!v.ok) return { ok: false, message: `Refusing to start LIVE: ${v.error}` };
+    this.vaultSweeper = new VaultSweeper({
+      signer,
+      rpc,
+      destination: { address: v.address, bytes: v.bytes },
+      settings: loadVaultSweepSettings(env, live),
+      mode: this.tradingMode === "live" ? "live" : "live_dry_run",
+      dataDir: join(this.cfg.ledgerDir, "live"),
+      sleep,
+      onEvent: (kind, title, body, signature) => {
+        this.events.push(kind, title, body, { signature });
+        try {
+          this.journal.appendEvent({ kind, symbol: "SOL", mint: "vault", detail: body, signature });
+        } catch {
+          /* ignore */
+        }
+      },
+    });
+    this.vaultWarning = null;
+    return { ok: true };
+  }
+
+  getVaultSweepStatus(): VaultSweepStatus | null {
+    if (!this.isLiveMode()) return null;
+    if (this.vaultSweeper) return this.vaultSweeper.status();
+    return {
+      configured: false,
+      addressMasked: null,
+      autoSweep: false,
+      minSweepSol: 0,
+      owedSol: 0,
+      pending: null,
+      failedAttempts: 0,
+      maxAttempts: 0,
+      stuck: false,
+      lastError: this.vaultError,
+      lastSweep: null,
+      warning: this.vaultError ?? this.vaultWarning ?? `${LIVE_VAULT_ADDRESS_ENV} not set — vault is bookkeeping only`,
+    };
+  }
+
+  /** Phone "Sweep vault now". Takes NO destination — always the env address. */
+  async sweepVaultNow(): Promise<{ ok: boolean; message: string; vaultSweep: VaultSweepStatus | null }> {
+    if (!this.isLiveMode()) return { ok: false, message: "Vault sweep is live-only (paper vault is bookkeeping)", vaultSweep: null };
+    if (!this.vaultSweeper) return { ok: false, message: this.getVaultSweepStatus()?.warning ?? "Vault not configured", vaultSweep: this.getVaultSweepStatus() };
+    const r = await this.vaultSweeper.process({ manual: true });
+    return { ...r, vaultSweep: this.getVaultSweepStatus() };
+  }
+
+  /** Skim (bookkeeping) and, in live with a vault address, queue + auto-sweep that profit as SOL. */
+  async skimAndSweep(body: unknown) {
+    const result = this.skimToVault(body);
+    if (!result.ok || !this.isLiveMode() || !this.vaultSweeper || !result.skimmedUsd) return { ...result, sweep: null };
+    const solUsd = await this.resolveQuoteUsdRate();
+    if (solUsd == null) {
+      return { ...result, sweep: { ok: false, message: "No SOL/USD rate — skim recorded but sweep not queued" } };
+    }
+    this.vaultSweeper.enqueueUsd(result.skimmedUsd, solUsd);
+    const st = this.vaultSweeper.status();
+    const sweep = st.autoSweep ? await this.vaultSweeper.process() : { ok: true, message: "Queued; auto-sweep off — use Sweep vault now" };
+    return { ...result, sweep, status: this.getStatus() };
   }
 
   /** Effective hard limit: min(config/env/PATCH value, live cap), always in (0, 300]. */
@@ -467,6 +573,12 @@ export class BotEngine {
       settings: live,
       mode: this.tradingMode === "live" ? "live" : "live_dry_run",
     });
+    const v = this.setupVault(signer.signer, rpc, process.env);
+    if (!v.ok) {
+      this.liveBroker = null;
+      this.vaultError = v.message;
+      return { ok: false, message: v.message };
+    }
     return { ok: true, broker: this.liveBroker };
   }
 
@@ -899,7 +1011,7 @@ export class BotEngine {
     portfolio?: PortfolioSnapshot;
     skimmedUsd?: number;
   } {
-    if (!this.cfg.paperMode) {
+    if (!this.cfg.paperMode && !this.isLiveMode()) {
       return {
         ok: false,
         message:
@@ -1176,6 +1288,9 @@ export class BotEngine {
     if (this.isLiveMode()) {
       if (opts?.reset) {
         return { ok: false, message: "Reset is paper-only; refusing to start LIVE with reset", status: this.getStatus() };
+      }
+      if (this.vaultError) {
+        return { ok: false, message: this.vaultError, status: this.getStatus() };
       }
       const b = this.ensureLiveBroker();
       if (!b.ok) {
@@ -1711,6 +1826,15 @@ export class BotEngine {
       this.stopReason = `daily_loss_cap (realized $${ledger.realizedPnl.toFixed(2)} ≤ −$${cfg.dailyLossUsd})`;
       log.warn(`Stopping runner after exits: ${this.stopReason}`);
       return true;
+    }
+
+    // Vault sweep: reconcile pending / retry roughly once a minute (never blocks exits).
+    if (this.vaultSweeper && now - this.lastVaultCheckAt > 60_000) {
+      this.lastVaultCheckAt = now;
+      const vs = this.vaultSweeper.status();
+      if (vs.pending || (vs.autoSweep && !vs.stuck && vs.owedSol >= vs.minSweepSol)) {
+        void this.vaultSweeper.process().catch(() => undefined);
+      }
     }
 
     // HARD daily loss (all modes): blocks new buys only; exits above already ran.

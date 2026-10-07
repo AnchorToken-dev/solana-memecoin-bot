@@ -334,16 +334,23 @@ Technical details: [docs/live-trading.md](docs/live-trading.md).
 2. **Lock the file so only you can read it:** `chmod 600 ~/bot-wallet.json`.
    The bot refuses to go live if other users can read it. The file stays on
    that machine only: never in the repo, chat, phone, or cloud.
-3. **Fund it small.** Send only the trading stake (about **$300 per paycheck**)
+3. **(Optional) Make a second "vault" wallet for your profits** (Phantom or
+   `solana-keygen new --outfile ~/vault-wallet.json`, then keep that file somewhere
+   else, never next to the bot). Copy **only its PUBLIC address** (the one you'd
+   share to receive money) into `.env` as `LIVE_VAULT_ADDRESS=...`. Never paste any
+   private key or recovery words. When you skim profit in LIVE, the bot sends that
+   SOL to this address (always keeping a little for fees). Leave it blank and the
+   vault is just a number on screen.
+4. **Fund it small.** Send only the trading stake (about **$300 per paycheck**)
    plus a little SOL for fees. Whatever is in this wallet is what you can lose.
-4. **Turn on dry-run.** In `.env` set:
+5. **Turn on dry-run.** In `.env` set:
    `PAPER_MODE=false`, `LIVE_TRADING_ENABLED=true`, `LIVE_CONFIRM=I_UNDERSTAND`,
    `LIVE_WALLET_KEYPAIR_PATH=/home/<you>/bot-wallet.json`, and leave
    `LIVE_DRY_RUN=true`. Restart the bot. The phone shows a big orange
    **LIVE DRY-RUN** banner.
-5. **Watch it for a day.** Trades show as `live_dry_run` in the journal. Nothing
+6. **Watch it for a day.** Trades show as `live_dry_run` in the journal. Nothing
    is sent and no SOL moves. Look for errors on the Status tab.
-6. **Go live.** Change only `LIVE_DRY_RUN=false` and restart. The banner turns
+7. **Go live.** Change only `LIVE_DRY_RUN=false` and restart. The banner turns
    red: **LIVE · REAL MONEY**. Defaults: $15 per trade (change with the $15 / $30 / $60 buttons on the phone; never above `LIVE_MAX_POSITION_USD`, default 60), 1 coin at a time, stop
    buying after −$300 in one day (the hard limit — see below), rug filter always on.
 
