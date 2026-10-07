@@ -73,7 +73,7 @@ export function loadLiveSettings(env: Env = process.env): LiveSettings {
   const slippageBps = num(env, "LIVE_SLIPPAGE_BPS", 1500, 10, 5000);
   const pool = (env.LIVE_POOL ?? "auto").trim();
   return {
-    maxPositionUsd: num(env, "LIVE_MAX_POSITION_USD", 15, 1, 1000),
+    maxPositionUsd: num(env, "LIVE_MAX_POSITION_USD", 60, 1, 1000),
     maxOpenPositions: Math.floor(num(env, "LIVE_MAX_OPEN_POSITIONS", 1, 1, 5)),
     dailyLossLimitUsd: num(env, "LIVE_DAILY_LOSS_LIMIT_USD", 30, 1, 10_000),
     minSolReserve: num(env, "LIVE_MIN_SOL_RESERVE", 0.05, 0.01, 10),

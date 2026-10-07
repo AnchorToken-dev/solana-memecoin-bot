@@ -66,6 +66,13 @@ import { HttpsLiveRpc } from "../live/rpc.js";
 import { PumpPortalBuilder } from "../live/pumpportal.js";
 import { redactSecrets } from "../live/redact.js";
 import { startOfDay } from "../journal/timezone.js";
+import {
+  TradeSizeStore,
+  isTradeSize,
+  tradeSizeStatus,
+  TRADE_SIZES_USD,
+  type TradeSizeStatus,
+} from "../risk/tradeSize.js";
 
 const ET_TZ = "America/New_York";
 
@@ -121,6 +128,8 @@ export interface EngineStatus {
   modeLabel: "PAPER" | "LIVE DRY-RUN" | "LIVE";
   /** Null in paper mode. */
   live: LiveStatus | null;
+  /** Hot-button trade size for NEW buys. */
+  tradeSize: TradeSizeStatus;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -194,6 +203,7 @@ export class BotEngine {
   private lastLiveError: string | null = null;
   private dailyLossAlertDay: number | null = null;
   private readonly sellFailAlerted = new Set<string>();
+  readonly tradeSizeStore: TradeSizeStore;
 
   constructor(
     cfg: BotConfig,
@@ -234,6 +244,7 @@ export class BotEngine {
         this.isLiveMode(cfg) ? join(cfg.ledgerDir, "live") : cfg.ledgerDir,
       );
     this.liveBroker = this.isLiveMode(cfg) ? (deps?.liveBroker ?? null) : null;
+    this.tradeSizeStore = new TradeSizeStore(cfg.ledgerDir);
     this.journal =
       deps?.journal ?? new TradeJournal(cfg.ledgerDir);
     this.checklist =
@@ -303,7 +314,30 @@ export class BotEngine {
       tradingMode: this.tradingMode,
       modeLabel: modeLabel(this.tradingMode),
       live: this.liveStatus(),
+      tradeSize: this.getTradeSize(),
     };
+  }
+
+  /** Active cap: LIVE_MAX_POSITION_USD in live/dry-run, MAX_POSITION_USD in paper. */
+  getTradeSize(): TradeSizeStatus {
+    const cap = this.isLiveMode() && this.cfg.live
+      ? { usd: this.cfg.live.maxPositionUsd, source: "LIVE_MAX_POSITION_USD" as const }
+      : { usd: this.cfg.maxPositionUsd > 0 ? this.cfg.maxPositionUsd : null, source: "MAX_POSITION_USD" as const };
+    return tradeSizeStatus(this.tradeSizeStore.get(), cap);
+  }
+
+  /** Set the hot-button size (15/30/60). New buys only; open positions untouched. */
+  setTradeSize(usd: unknown): { ok: boolean; status: number; message: string; tradeSize: TradeSizeStatus } {
+    if (!isTradeSize(usd)) {
+      return { ok: false, status: 400, message: `usd must be one of ${TRADE_SIZES_USD.join(", ")}`, tradeSize: this.getTradeSize() };
+    }
+    const opt = this.getTradeSize().options.find((o) => o.usd === usd)!;
+    if (!opt.enabled) {
+      return { ok: false, status: 409, message: `$${usd} not allowed: ${opt.reason}`, tradeSize: this.getTradeSize() };
+    }
+    this.tradeSizeStore.set(usd);
+    log.info(`Trade size set to $${usd} (new buys only)`);
+    return { ok: true, status: 200, message: `Trade size $${usd} for new buys`, tradeSize: this.getTradeSize() };
   }
 
   get tradingMode(): TradingMode {
@@ -1674,6 +1708,9 @@ export class BotEngine {
       log.info(`Skip entry ${entry.symbol}: ${sized.reason}`);
       return false;
     }
+    // Hot-button size (already clamped to the active cap) bounds every new buy.
+    const tradeSize = this.getTradeSize();
+    sized.notionalUsd = Math.min(sized.notionalUsd, tradeSize.effectiveUsd);
 
     if (cfg.requireChecklistGo && !this.checklist.hasGoForMint(entry.mint)) {
       log.info(
@@ -1763,7 +1800,7 @@ export class BotEngine {
         return false;
       }
       fill = res.fill;
-      position = res.position;
+      position = { ...res.position, tradeSizeUsd: tradeSize.selectedUsd };
       void this.refreshLiveBalance();
     } else {
       ({ fill, position } = broker.applyBuy({
@@ -1772,6 +1809,7 @@ export class BotEngine {
         markPrice: entry.priceUsd,
         notionalUsd: sized.notionalUsd,
       }));
+      position = { ...position, tradeSizeUsd: tradeSize.selectedUsd };
     }
     ledger.recordBuy(fill, position);
     log.info(`Entry signal: ${entry.reason}`);

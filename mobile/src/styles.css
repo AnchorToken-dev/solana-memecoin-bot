@@ -566,3 +566,12 @@ button.pin-action {
 .mode-live_dry_run { background: #78350f; color: #ffffff; border-color: #fbbf24; }
 .mode-live { background: #b91c1c; color: #ffffff; border-color: #ffffff; }
 .mode-unknown { background: #374151; color: #ffffff; }
+
+/* Trade-size hot buttons — large, readable without glasses. */
+.size-big { font-size: 3rem; font-weight: 900; text-align: center; margin: 6px 0 12px; color: #fff; }
+.size-big span { font-size: 1.1rem; font-weight: 600; color: var(--muted); }
+.size-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.size-btn { width: 100%; min-height: 72px; font-size: 1.8rem; font-weight: 900; border-radius: 14px; border: 3px solid #475569; background: #1e293b; color: #fff; }
+.size-btn.active { background: #2563eb; border-color: #fff; }
+.size-btn:disabled { opacity: 0.4; }
+.size-why { font-size: 0.95rem; text-align: center; color: #fbbf24; margin-top: 4px; }

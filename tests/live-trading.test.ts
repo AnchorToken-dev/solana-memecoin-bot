@@ -101,7 +101,7 @@ describe("trading mode gates", () => {
 describe("live caps", () => {
   it("defaults are conservative", () => {
     const s = loadLiveSettings({});
-    assert.equal(s.maxPositionUsd, 15);
+    assert.equal(s.maxPositionUsd, 60);
     assert.equal(s.maxOpenPositions, 1);
     assert.equal(s.dailyLossLimitUsd, 30);
     assert.ok(s.priorityFeeSol <= s.priorityFeeMaxSol);
@@ -247,7 +247,7 @@ describe("LiveBroker", () => {
 
   it("caps notional at LIVE_MAX_POSITION_USD and records real on-chain fill", async () => {
     const rpc = new MockRpc({ meta: buyMeta });
-    const { broker, builder } = mkBroker(rpc);
+    const { broker, builder } = mkBroker(rpc, "live", { LIVE_MAX_POSITION_USD: "15" });
     const r = await broker.buy(buyArgs);
     assert.ok(r.ok);
     assert.equal(builder.calls[0]!.amount, Number((15 / 118).toFixed(6)));
@@ -487,6 +487,90 @@ describe("default config (no new env vars) is unchanged paper", () => {
       assert.doesNotThrow(() => assertPaperOrStubLive(cfg));
     } finally {
       for (const k of keys) if (saved[k] !== undefined) process.env[k] = saved[k];
+    }
+  });
+});
+
+// ---------- trade-size hot buttons ----------
+import { TradeSizeStore, tradeSizeStatus, isTradeSize, DEFAULT_TRADE_SIZE_USD } from "../src/risk/tradeSize.js";
+
+describe("trade-size hot buttons", () => {
+  it("allows only 15/30/60; default is 15", () => {
+    for (const v of [15, 30, 60]) assert.ok(isTradeSize(v));
+    for (const v of [0, 14, 16, 25, 45, 61, 100, -15, "15", null, undefined, 15.5]) assert.equal(isTradeSize(v), false);
+    assert.equal(DEFAULT_TRADE_SIZE_USD, 15);
+    assert.equal(loadLiveSettings({}).maxPositionUsd, 60);
+  });
+  it("persists across restarts (new store instance)", () => {
+    const d = mkdtempSync(join(tmpdir(), "ts-"));
+    try {
+      assert.equal(new TradeSizeStore(d).get(), 15);
+      new TradeSizeStore(d).set(30);
+      assert.equal(new TradeSizeStore(d).get(), 30);
+      writeFileSync(join(d, "trade-size.json"), '{"usd":999}');
+      assert.equal(new TradeSizeStore(d).get(), 15);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+  it("cap disables buttons above it and clamps a saved size", () => {
+    const st = tradeSizeStatus(60, { usd: 30, source: "LIVE_MAX_POSITION_USD" });
+    assert.deepEqual(st.options.map((o) => o.enabled), [true, true, false]);
+    assert.match(st.options[2]!.reason!, /LIVE_MAX_POSITION_USD/);
+    assert.equal(st.effectiveUsd, 30);
+    assert.ok(st.warning);
+  });
+  it("engine endpoint logic: rejects bad values and above-cap in live; works in paper", async () => {
+    const d = mkdtempSync(join(tmpdir(), "ts-eng-"));
+    try {
+      const cfg = { ...liveCfg(d), live: loadLiveSettings({ LIVE_MAX_POSITION_USD: "30" }) };
+      const rpc = new MockRpc({ meta: buyMeta });
+      const { broker } = mkBroker(rpc, "live_dry_run");
+      const e = new BotEngine(cfg, { market: new OneCoinMarket(), liveBroker: broker, solanaWs: null, solanaRpc: null });
+      assert.equal(e.getStatus().tradeSize.selectedUsd, 15);
+      assert.equal(e.setTradeSize(25).status, 400);
+      assert.equal(e.setTradeSize("30").status, 400);
+      assert.equal(e.setTradeSize(60).status, 409);
+      assert.equal(e.setTradeSize(30).ok, true);
+      assert.equal(e.getStatus().tradeSize.effectiveUsd, 30);
+      await e.dispose();
+      // Restart → still 30
+      const e2 = new BotEngine(cfg, { market: new OneCoinMarket(), liveBroker: broker, solanaWs: null, solanaRpc: null });
+      assert.equal(e2.getTradeSize().selectedUsd, 30);
+      await e2.dispose();
+      // Paper: MAX_POSITION_USD caps (50) → 60 disabled, 30 ok
+      const p = new BotEngine({ ...liveCfg(d), paperMode: true, tradingMode: "paper", live: undefined, maxPositionUsd: 50 }, { market: new OneCoinMarket(), solanaWs: null, solanaRpc: null });
+      assert.equal(p.setTradeSize(60).status, 409);
+      assert.equal(p.setTradeSize(15).ok, true);
+      await p.dispose();
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+  it("paper buy uses the selected size and the journal records it", async () => {
+    const d = mkdtempSync(join(tmpdir(), "ts-buy-"));
+    try {
+      const cfg = { ...liveCfg(d), paperMode: true, tradingMode: "paper" as const, live: undefined, maxPositionUsd: 100, takeProfitPct: 10 };
+      const market = new OneCoinMarket();
+      const e = new BotEngine(cfg, { market, solanaWs: null, solanaRpc: null });
+      e.setTradeSize(30);
+      await e.start();
+      await new Promise((r) => setTimeout(r, 100));
+      const pos = e.ledger.openPositions[0]!;
+      assert.equal(pos.entryNotionalUsd, 30);
+      assert.equal(pos.tradeSizeUsd, 30);
+      // Changing size does not touch the open position
+      e.setTradeSize(15);
+      assert.equal(e.ledger.openPositions[0]!.entryNotionalUsd, 30);
+      market.price = 0.00004;
+      await new Promise((r) => setTimeout(r, 3500));
+      await e.stop();
+      const row = e.journal.list().entries[0]!;
+      assert.equal(row.tradeSizeUsd, 30);
+      assert.equal(row.mode, "paper");
+      await e.dispose();
+    } finally {
+      rmSync(d, { recursive: true, force: true });
     }
   });
 });

@@ -147,6 +147,16 @@ export function createControlApp(engine: BotEngine) {
    * Apply named preset: { "preset": "momentum" | "sniper" }.
    * Requires runner stopped; persists overlay.
    */
+  /** Hot-button trade size: body { usd: 15 | 30 | 60 }. Any mode; new buys only. */
+  app.get("/config/trade-size", (_req, res) => {
+    res.json({ tradeSize: engine.getTradeSize() });
+  });
+  app.post("/config/trade-size", (req, res) => {
+    const body = (req.body ?? {}) as { usd?: unknown };
+    const r = engine.setTradeSize(body.usd);
+    res.status(r.status).json({ ok: r.ok, message: r.message, tradeSize: r.tradeSize });
+  });
+
   app.post("/config/preset", (req, res) => {
     if (!engine.cfg.paperMode) {
       res.status(403).json({
@@ -178,6 +188,7 @@ export function createControlApp(engine: BotEngine) {
       res.json({
         bankrollUsd: engine.cfg.bankrollUsd,
         maxPositionUsd: engine.cfg.maxPositionUsd,
+        tradeSize: engine.getTradeSize(),
         vaultUsd: portfolio.vaultUsd,
         tradableCashUsd: portfolio.tradableCashUsd,
         chaseLockout: engine.getChaseLockout(),

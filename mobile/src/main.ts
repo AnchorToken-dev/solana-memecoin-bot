@@ -284,7 +284,18 @@ async function paintControl(main: Element) {
       </div>
       <p class="muted" style="margin-top:10px"><strong>Exit now</strong> / <strong>Reset</strong> live on the <strong>PnL</strong> tab (near equity / open position). Change take-profit via server env <code>TAKE_PROFIT_PCT</code> (default 25; 0 = off).</p>
     </div>
+    ${tradeSizeCard(status)}
     ${pinCard(status)}`;
+  main.querySelectorAll("button[data-size]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const usd = Number((btn as HTMLButtonElement).dataset.size);
+      if (usd === 60 && status.tradingMode === "live" && !confirm("Switch to $60 per trade with REAL money?")) return;
+      void withBusy(async () => {
+        const r = await api.setTradeSize(usd);
+        message = r.message;
+      });
+    });
+  });
   main.querySelector("#start")?.addEventListener("click", () => {
     void withBusy(async () => {
       await onStartRequestAlerts();
@@ -1286,4 +1297,33 @@ function liveRows(status: Record<string, unknown>): string {
       <div class="row"><span class="k">Today (live)</span><span class="v ${live.dailyLossLimitHit ? "warn-text" : ""}">$${(live.todayRealizedUsd ?? 0).toFixed(2)}${live.dailyLossLimitHit ? " · LIMIT HIT" : ""}</span></div>
       ${live.buysHalted ? `<div class="row"><span class="k">Buys</span><span class="v warn-text">HALTED</span></div>` : ""}
       ${live.lastLiveError ? `<div class="row"><span class="k">Live error</span><span class="v warn-text">${escapeHtml(live.lastLiveError)}</span></div>` : ""}`;
+}
+
+/** $15 / $30 / $60 hot buttons + big active size. New buys only. */
+function tradeSizeCard(status: Record<string, unknown>): string {
+  const ts = status.tradeSize as
+    | {
+        selectedUsd: number;
+        effectiveUsd: number;
+        warning: string | null;
+        options: { usd: number; enabled: boolean; reason: string | null }[];
+      }
+    | undefined;
+  if (!ts) return "";
+  const btns = ts.options
+    .map(
+      (o) => `<div class="size-opt">
+        <button class="size-btn ${o.usd === ts.selectedUsd ? "active" : ""}" data-size="${o.usd}" ${busy || !o.enabled ? "disabled" : ""}>$${o.usd}</button>
+        ${o.reason ? `<div class="size-why">${escapeHtml(o.reason)}</div>` : ""}
+      </div>`,
+    )
+    .join("");
+  return `
+    <div class="card">
+      <h2>Trade size</h2>
+      <div class="size-big">$${ts.effectiveUsd} <span>per trade</span></div>
+      ${ts.warning ? `<p class="warn-text">${escapeHtml(ts.warning)}</p>` : ""}
+      <div class="size-row">${btns}</div>
+      <p class="muted">Applies to new buys only. Coins already held keep their size.</p>
+    </div>`;
 }

@@ -50,6 +50,11 @@ async function request<T>(
 
 export const api = {
   health: () => request<{ ok: boolean; paperMode: boolean; tradingMode?: string }>("/health"),
+  setTradeSize: (usd: number) =>
+    request<{ ok: boolean; message: string }>("/config/trade-size", {
+      method: "POST",
+      body: JSON.stringify({ usd }),
+    }),
   sellAll: () =>
     request<{ ok: boolean; message: string }>("/runner/sell-all", { method: "POST" }),
   status: () => request<Record<string, unknown>>("/status"),

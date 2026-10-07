@@ -82,6 +82,8 @@ export interface JournalEntry {
   mode: TradingMode;
   /** On-chain sell signature (live only). */
   signature: string | null;
+  /** Hot-button trade size used for the buy ($15/$30/$60). null on old rows. */
+  tradeSizeUsd: number | null;
 }
 
 export type JournalModeFilter = TradingMode | "all";
@@ -274,6 +276,7 @@ function normalizeEntry(raw: unknown): JournalEntry | null {
         : null,
     mode: e.mode === "live" || e.mode === "live_dry_run" ? e.mode : "paper",
     signature: typeof e.signature === "string" ? e.signature : null,
+    tradeSizeUsd: typeof e.tradeSizeUsd === "number" ? e.tradeSizeUsd : null,
   };
 }
 
@@ -624,6 +627,7 @@ export class TradeJournal {
           : null,
       mode: args.mode ?? "paper",
       signature: args.signature ?? null,
+      tradeSizeUsd: typeof args.position.tradeSizeUsd === "number" ? args.position.tradeSizeUsd : null,
     };
     this.entries.push(entry);
     this.persist();

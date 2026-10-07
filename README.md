@@ -344,7 +344,7 @@ Technical details: [docs/live-trading.md](docs/live-trading.md).
 5. **Watch it for a day.** Trades show as `live_dry_run` in the journal. Nothing
    is sent and no SOL moves. Look for errors on the Status tab.
 6. **Go live.** Change only `LIVE_DRY_RUN=false` and restart. The banner turns
-   red: **LIVE · REAL MONEY**. Defaults: $15 per trade, 1 coin at a time, stop
+   red: **LIVE · REAL MONEY**. Defaults: $15 per trade (change with the $15 / $30 / $60 buttons on the phone; never above `LIVE_MAX_POSITION_USD`, default 60), 1 coin at a time, stop
    buying after −$30 in one day (resets at midnight ET), rug filter always on.
 
 **Emergency:** Stop on the phone (or `POST /runner/stop`) stops new buys right

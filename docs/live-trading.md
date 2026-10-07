@@ -41,7 +41,7 @@ HTTPS polling is simpler and was enough.
 
 ## Safety rules in code
 
-- Live caps (env only, never PATCH-able): `LIVE_MAX_POSITION_USD` (15),
+- Live caps (env only, never PATCH-able): `LIVE_MAX_POSITION_USD` (60; hot-button size $15/$30/$60 never exceeds it),
   `LIVE_MAX_OPEN_POSITIONS` (1), `LIVE_DAILY_LOSS_LIMIT_USD` (30, ET day, from
   journal live rows), `LIVE_MIN_SOL_RESERVE` (0.05 SOL).
 - Rug filter is forced on in live. No RPC or a filter error means **skip the buy**.
@@ -76,3 +76,15 @@ $15 ≈ 0.127 SOL.
 Paper models 0.5% slippage + 0.3% fee (about $0.24 per round trip), so live will
 be noticeably worse than paper before any slippage. Consider raising paper
 `FEE_BPS` to ~200 to preview it.
+
+## Trade-size hot buttons ($15 / $30 / $60)
+
+- `POST /config/trade-size` `{ "usd": 15 | 30 | 60 }`: any other value → 400; above the active cap → 409.
+  `GET /config/trade-size`. Also shown in `/status.tradeSize` and `/portfolio.tradeSize`.
+- Works in paper, dry-run and live, and is allowed while running. It affects **new buys only**.
+- Persisted in `data/trade-size.json`. Default is $15.
+- Cap: `LIVE_MAX_POSITION_USD` in live/dry-run, `MAX_POSITION_USD` in paper. Buttons above the cap are
+  disabled with the reason. If the cap is later lowered below the saved size, buys use the cap and
+  a warning shows.
+- Every new buy = min(normal sizing, selected size, cap). Journal rows store `tradeSizeUsd`.
+- Phone: three big buttons + the active size in large text. Switching to $60 in LIVE asks to confirm first.

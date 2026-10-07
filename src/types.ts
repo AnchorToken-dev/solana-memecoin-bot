@@ -168,6 +168,8 @@ export interface Position {
   highWaterPrice: number;
   trailArmed: boolean;
   openedAt: number;
+  /** Hot-button trade size selected when this position was bought. */
+  tradeSizeUsd?: number;
 }
 
 export interface Fill {
