@@ -26,3 +26,29 @@ export function base58Encode(bytes: Uint8Array): string {
   }
   return out;
 }
+
+/** Base58 decode. Throws on invalid characters. */
+export function base58Decode(s: string): Uint8Array {
+  const map = new Map([..."123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"].map((c, i) => [c, i]));
+  const bytes: number[] = [0];
+  for (const ch of s) {
+    const v = map.get(ch);
+    if (v === undefined) throw new Error("invalid base58");
+    let carry = v;
+    for (let j = 0; j < bytes.length; j++) {
+      carry += bytes[j]! * 58;
+      bytes[j] = carry & 0xff;
+      carry >>= 8;
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff);
+      carry >>= 8;
+    }
+  }
+  let zeros = 0;
+  while (zeros < s.length && s[zeros] === "1") zeros++;
+  const out = bytes.reverse();
+  // strip the leading 0 placeholder when the number is non-zero
+  while (out.length > 0 && out[0] === 0) out.shift();
+  return Uint8Array.from([...new Array(zeros).fill(0), ...out]);
+}

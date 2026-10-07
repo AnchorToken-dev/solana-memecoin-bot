@@ -9,6 +9,7 @@
  * (SOL today; multi-chain via quoteAsset / chainId). P&L rollups use
  * America/New_York calendar periods by default.
  */
+import type { TradingMode } from "../live/mode.js";
 import {
   mkdirSync,
   writeFileSync,
@@ -77,6 +78,23 @@ export interface JournalEntry {
   quoteUsdRate: number | null;
   /** How quote amounts were obtained. */
   quoteBasis: QuoteBasis;
+  /** paper | live_dry_run | live. Old rows without it load as paper. */
+  mode: TradingMode;
+  /** On-chain sell signature (live only). */
+  signature: string | null;
+  /** Hot-button trade size used for the buy ($15/$30/$60). null on old rows. */
+  tradeSizeUsd: number | null;
+}
+
+export type JournalModeFilter = TradingMode | "all";
+
+export function isJournalModeFilter(v: unknown): v is JournalModeFilter {
+  return v === "paper" || v === "live_dry_run" || v === "live" || v === "all";
+}
+
+export function filterEntriesByMode(entries: JournalEntry[], mode: JournalModeFilter | undefined): JournalEntry[] {
+  if (!mode || mode === "all") return entries;
+  return entries.filter((e) => e.mode === mode);
 }
 
 export type JournalPeriodKey = "daily" | "weekly" | "monthly" | "overall";
@@ -256,6 +274,9 @@ function normalizeEntry(raw: unknown): JournalEntry | null {
       typeof e.checklistThesis === "string" && e.checklistThesis.trim()
         ? e.checklistThesis.trim().slice(0, 200)
         : null,
+    mode: e.mode === "live" || e.mode === "live_dry_run" ? e.mode : "paper",
+    signature: typeof e.signature === "string" ? e.signature : null,
+    tradeSizeUsd: typeof e.tradeSizeUsd === "number" ? e.tradeSizeUsd : null,
   };
 }
 
@@ -471,8 +492,11 @@ export class TradeJournal {
     nowMs?: number;
     timeZone?: string;
     estimateQuoteUsdRate?: number | null;
+    /** Filter rows + summary + charts by mode. Default all. */
+    mode?: JournalModeFilter;
   }): JournalListResult {
-    const total = this.entries.length;
+    const rows = filterEntriesByMode(this.entries, opts?.mode);
+    const total = rows.length;
     const limitRaw = opts?.limit ?? 50;
     const offsetRaw = opts?.offset ?? 0;
     const limit = Number.isFinite(limitRaw)
@@ -482,13 +506,13 @@ export class TradeJournal {
       ? Math.max(0, Math.floor(offsetRaw))
       : 0;
     // Newest first
-    const newestFirst = [...this.entries].reverse();
-    const summary = computeJournalSummary(this.entries, {
+    const newestFirst = [...rows].reverse();
+    const summary = computeJournalSummary(rows, {
       nowMs: opts?.nowMs,
       timeZone: opts?.timeZone,
       estimateQuoteUsdRate: opts?.estimateQuoteUsdRate,
     });
-    const charts = computeJournalCharts(this.entries, {
+    const charts = computeJournalCharts(rows, {
       timeZone: opts?.timeZone,
     });
     return {
@@ -499,6 +523,35 @@ export class TradeJournal {
       summary,
       charts,
     };
+  }
+
+  /**
+   * Live problem log (failed sells, unconfirmed buys). Separate file so the
+   * closed-trade schema in journal.json stays unchanged. Capped at 500 rows.
+   */
+  appendEvent(ev: { kind: string; symbol: string; mint: string; detail: string; signature?: string | null }): void {
+    const path = join(this.dataDir, "live-events.json");
+    const list = this.listEvents();
+    list.push({ ...ev, timestamp: Date.now() });
+    writeFileSync(path, `${JSON.stringify(list.slice(-500), null, 2)}\n`, "utf8");
+  }
+
+  listEvents(): Array<{ kind: string; symbol: string; mint: string; detail: string; signature?: string | null; timestamp: number }> {
+    const path = join(this.dataDir, "live-events.json");
+    if (!existsSync(path)) return [];
+    try {
+      const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+      return Array.isArray(raw) ? (raw as never[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Sum of realized PnL for rows of `mode` closed at or after fromMs. */
+  realizedSince(fromMs: number, mode: TradingMode): number {
+    return this.entries
+      .filter((e) => e.mode === mode && e.timestamp >= fromMs)
+      .reduce((a, e) => a + e.pnlUsd, 0);
   }
 
   getById(id: string): JournalEntry | undefined {
@@ -526,6 +579,8 @@ export class TradeJournal {
     checklistId?: string | null;
     checklistVerdict?: "GO" | "NO-GO" | "INCOMPLETE" | null;
     checklistThesis?: string | null;
+    mode?: TradingMode;
+    signature?: string | null;
   }): JournalEntry {
     const sizeUsd = args.position.entryNotionalUsd;
     const pnlPct = sizeUsd > 0 ? (args.pnlUsd / sizeUsd) * 100 : 0;
@@ -570,6 +625,9 @@ export class TradeJournal {
         typeof args.checklistThesis === "string" && args.checklistThesis.trim()
           ? args.checklistThesis.trim().slice(0, 200)
           : null,
+      mode: args.mode ?? "paper",
+      signature: args.signature ?? null,
+      tradeSizeUsd: typeof args.position.tradeSizeUsd === "number" ? args.position.tradeSizeUsd : null,
     };
     this.entries.push(entry);
     this.persist();
@@ -582,6 +640,7 @@ export class TradeJournal {
       quoteAsset: entry.quoteAsset,
       quoteBasis: entry.quoteBasis,
       reason: entry.exitReason,
+      mode: entry.mode,
       checklistId: entry.checklistId,
       checklistVerdict: entry.checklistVerdict,
     });

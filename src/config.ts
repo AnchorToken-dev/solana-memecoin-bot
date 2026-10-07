@@ -6,6 +6,9 @@ import type { ActivePreset, BotConfig } from "./types.js";
 import { PRESETS, isPresetName, type PresetName } from "./presets.js";
 import { solanaRpcIsConfigured } from "./solana/rpc.js";
 import { solanaRpcWssIsConfigured } from "./solana/ws.js";
+import { clampHardDailyLoss } from "./risk/hardDailyLoss.js";
+import { resolveTradingMode, loadLiveSettings } from "./live/mode.js";
+import { LIVE_WALLET_KEYPAIR_PATH_ENV } from "./live/keypair.js";
 
 loadDotenv();
 
@@ -86,6 +89,8 @@ export const PaperPatchSchema = z
     rugFilterEnabled: z.boolean().optional(),
     rugFilterMaxTopHolderPct: z.number().gt(0).lte(100).optional(),
     rugFilterMaxSameSlotBuys: z.number().int().nonnegative().optional(),
+    /** Hard daily loss limit: may only LOWER below $300. Anything else clamps to 300. */
+    hardDailyLossUsd: z.unknown().optional(),
   })
   .strict();
 
@@ -226,6 +231,7 @@ export function overlayFromConfig(cfg: BotConfig): RuntimeOverlay {
     maxPositionUsd: cfg.maxPositionUsd,
     maxHoldMinutes: cfg.maxHoldMinutes,
     dailyLossUsd: cfg.dailyLossUsd,
+    ...(typeof cfg.hardDailyLossUsd === "number" ? { hardDailyLossUsd: cfg.hardDailyLossUsd } : {}),
     chaseLockoutHours: cfg.chaseLockoutHours,
     momentum: { ...cfg.momentum },
     trailingTakeProfit: { ...cfg.trailingTakeProfit },
@@ -261,6 +267,11 @@ function applyOverlay(cfg: BotConfig, overlay: RuntimeOverlay): void {
     cfg.maxHoldMinutes = overlay.maxHoldMinutes;
   }
   if (overlay.dailyLossUsd != null) cfg.dailyLossUsd = overlay.dailyLossUsd;
+  if ((overlay as { hardDailyLossUsd?: unknown }).hardDailyLossUsd !== undefined) {
+    const c = clampHardDailyLoss((overlay as { hardDailyLossUsd?: unknown }).hardDailyLossUsd, "runtime-config hardDailyLossUsd");
+    cfg.hardDailyLossUsd = c.usd;
+    if (c.warning) cfg.hardDailyLossWarnings = [...(cfg.hardDailyLossWarnings ?? []), c.warning];
+  }
   if (overlay.chaseLockoutHours != null) {
     cfg.chaseLockoutHours = overlay.chaseLockoutHours;
   }
@@ -380,6 +391,11 @@ export function applyPaperPatch(cfg: BotConfig, patch: PaperConfigPatch): void {
   if (patch.maxPositionUsd != null) cfg.maxPositionUsd = patch.maxPositionUsd;
   if (patch.maxHoldMinutes != null) cfg.maxHoldMinutes = patch.maxHoldMinutes;
   if (patch.dailyLossUsd != null) cfg.dailyLossUsd = patch.dailyLossUsd;
+  if ("hardDailyLossUsd" in patch) {
+    const c = clampHardDailyLoss(patch.hardDailyLossUsd ?? "unset", "PATCH hardDailyLossUsd");
+    cfg.hardDailyLossUsd = c.usd;
+    cfg.hardDailyLossWarnings = c.warning ? [c.warning] : [];
+  }
   if (patch.chaseLockoutHours != null) {
     cfg.chaseLockoutHours = patch.chaseLockoutHours;
   }
@@ -540,15 +556,65 @@ export function loadConfig(opts?: {
   }
 
   merged.activePreset = inferActivePreset(merged);
-  return ConfigSchema.parse(merged);
+  const parsed = ConfigSchema.parse(merged) as BotConfig;
+  // Hard daily loss: env/file may only lower it. Overlay (applied above) wins if present.
+  const fileOrEnv = clampHardDailyLoss(
+    process.env.HARD_DAILY_LOSS_USD ?? (file as { hardDailyLossUsd?: unknown }).hardDailyLossUsd,
+    process.env.HARD_DAILY_LOSS_USD !== undefined ? "HARD_DAILY_LOSS_USD" : "config hardDailyLossUsd",
+  );
+  const overlayVal = (merged as BotConfig).hardDailyLossUsd;
+  parsed.hardDailyLossUsd =
+    typeof overlayVal === "number" ? Math.min(overlayVal, fileOrEnv.usd) : fileOrEnv.usd;
+  parsed.hardDailyLossWarnings = [
+    ...(fileOrEnv.warning ? [fileOrEnv.warning] : []),
+    ...((merged as BotConfig).hardDailyLossWarnings ?? []),
+  ];
+  for (const w of parsed.hardDailyLossWarnings) console.warn(`[hard-daily-loss] ${w}`);
+  return applyTradingModeGates(parsed);
 }
 
-export function assertPaperOrStubLive(cfg: BotConfig): void {
-  if (cfg.paperMode) return;
-  // Live path is intentionally stubbed — refuse to run without explicit future wiring.
-  throw new Error(
-    "LIVE mode is stubbed. Keep PAPER_MODE=true. See README § Live wiring (stub).",
-  );
+/**
+ * Apply the live gates to a loaded config. Every gate must pass or we stay
+ * PAPER (paperMode forced true). Exported for tests.
+ */
+export function applyTradingModeGates(
+  cfg: BotConfig,
+  env: Record<string, string | undefined> = process.env,
+): BotConfig {
+  const decision = resolveTradingMode(env);
+  cfg.tradingMode = decision.mode;
+  if (decision.mode === "paper") {
+    if (!cfg.paperMode) {
+      // PAPER_MODE=false alone is NOT enough — fall back to paper loudly.
+      console.warn(
+        `[live-gate] Staying in PAPER mode: ${decision.paperReasons.join("; ")}`,
+      );
+    }
+    cfg.paperMode = true;
+    delete cfg.live;
+    return cfg;
+  }
+  cfg.paperMode = false;
+  cfg.live = loadLiveSettings(env);
+  // Rug filter is mandatory in any live mode.
+  cfg.rugFilterEnabled = true;
+  return cfg;
+}
+
+/** Throws (refuses to start) when live is selected but prerequisites are missing. */
+export function assertPaperOrStubLive(
+  cfg: BotConfig,
+  env: Record<string, string | undefined> = process.env,
+): void {
+  if (cfg.paperMode || !cfg.tradingMode || cfg.tradingMode === "paper") return;
+  const missing: string[] = [];
+  if (!env[LIVE_WALLET_KEYPAIR_PATH_ENV]?.trim()) missing.push(LIVE_WALLET_KEYPAIR_PATH_ENV);
+  if (!env.SOLANA_RPC_URL?.trim()) missing.push("SOLANA_RPC_URL");
+  if (missing.length > 0) {
+    throw new Error(
+      `Refusing to start LIVE: missing ${missing.join(", ")}. Unset LIVE_TRADING_ENABLED to run paper.`,
+    );
+  }
 }
 
 export { isPresetName };

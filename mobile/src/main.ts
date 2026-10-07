@@ -84,13 +84,30 @@ async function withBusy(fn: () => Promise<void>) {
   }
 }
 
+/** Huge PAPER / LIVE DRY-RUN / LIVE banner — readable without glasses. */
+async function paintModeBanner(): Promise<void> {
+  const el = document.querySelector("#modeBanner");
+  if (!el) return;
+  try {
+    const h = await api.health();
+    const m = h.tradingMode ?? (h.paperMode ? "paper" : "unknown");
+    const text = m === "live" ? "LIVE · REAL MONEY" : m === "live_dry_run" ? "LIVE DRY-RUN" : m === "paper" ? "PAPER" : "MODE ?";
+    el.textContent = text;
+    el.className = `mode-banner mode-${m}`;
+  } catch {
+    el.textContent = "OFFLINE";
+    el.className = "mode-banner mode-unknown";
+  }
+}
+
 async function render() {
   const base = await getApiBaseUrl();
   app.innerHTML = `
     <header>
       <h1>Memecoin Paper Bot</h1>
       <p>Phone = control UI · engine stays on your laptop</p>
-      <span class="badge">PAPER ONLY · no wallet keys in app</span>
+      <div id="modeBanner" class="mode-banner mode-unknown" role="status" aria-live="polite">MODE …</div>
+      <span class="badge">No wallet keys in app · ever</span>
     </header>
     <main id="main"></main>
     <nav class="tabs">
@@ -106,6 +123,7 @@ async function render() {
     });
   });
 
+  void paintModeBanner();
   const main = app.querySelector("#main")!;
   if (error) main.insertAdjacentHTML("beforeend", `<div class="err">${escapeHtml(error)}</div>`);
   if (message) main.insertAdjacentHTML("beforeend", `<div class="ok">${escapeHtml(message)}</div>`);
@@ -191,10 +209,12 @@ async function paintStatus(main: Element) {
   const stall = runningNow && cycleAgeMs != null && cycleAgeMs > 45_000;
   main.innerHTML = `
     ${chaseLockoutBanner(lock)}
+    ${hardLossCard(status)}
     <div class="card">
       <h2>Engine status</h2>
       <div class="row"><span class="k">Health</span><span class="v">${health.ok ? "ok" : "bad"}</span></div>
-      <div class="row"><span class="k">Paper mode</span><span class="v">${String(health.paperMode)}</span></div>
+      <div class="row"><span class="k">Mode</span><span class="v">${escapeHtml(String(status.modeLabel ?? (health.paperMode ? "PAPER" : "?")))}</span></div>
+      ${liveRows(status)}
       <div class="row"><span class="k">State</span><span class="v">${escapeHtml(String(status.state))}</span></div>
       <div class="row"><span class="k">Cycle</span><span class="v">${escapeHtml(String(status.cycle ?? 0))}</span></div>
       <div class="row"><span class="k">Source</span><span class="v">${escapeHtml(String(status.marketDataSource ?? "—"))}</span></div>
@@ -247,7 +267,7 @@ async function paintControl(main: Element) {
     ${chaseLockoutBanner(lock)}
     <div class="card">
       <h2>Paper runner</h2>
-      <p class="muted">Start/stop only works while the server has PAPER_MODE=true. Live trading is stubbed — this app never holds keys.</p>
+      <p class="muted">Mode is set on the laptop/Pi only (env). This app never holds keys. In LIVE, Stop halts new buys first; press Stop again to stop fully.</p>
       <div class="row"><span class="k">State</span><span class="v">${escapeHtml(String(status.state))}</span></div>
       <div class="row"><span class="k">Open positions</span><span class="v">${openCount}</span></div>
       <div class="row"><span class="k">Take-profit</span><span class="v">${tp == null ? "—" : tp <= 0 ? "off (env TAKE_PROFIT_PCT)" : `+${tp}% (env TAKE_PROFIT_PCT)`}</span></div>
@@ -258,17 +278,44 @@ async function paintControl(main: Element) {
           : ""
       }
       <div class="actions">
-        <button class="primary" id="start" ${busy||running||locked?"disabled":""}>Start paper bot</button>
+        <button class="primary" id="start" ${busy||running||locked?"disabled":""}>Start ${escapeHtml(String(status.modeLabel ?? "PAPER"))} bot</button>
         <button class="danger" id="stop" ${busy||!running?"disabled":""}>Stop</button>
+        ${status.live ? `<button class="danger" id="sellAll" ${busy?"disabled":""}>STOP + SELL ALL</button>` : ""}
         <button class="secondary" id="refresh">Refresh</button>
       </div>
       <p class="muted" style="margin-top:10px"><strong>Exit now</strong> / <strong>Reset</strong> live on the <strong>PnL</strong> tab (near equity / open position). Change take-profit via server env <code>TAKE_PROFIT_PCT</code> (default 25; 0 = off).</p>
     </div>
+    ${hardLossCard(status)}
+    ${tradeSizeCard(status)}
+    ${vaultSweepCard(status)}
     ${pinCard(status)}`;
+  main.querySelectorAll("button[data-size]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const usd = Number((btn as HTMLButtonElement).dataset.size);
+      if (usd === 60 && status.tradingMode === "live" && !confirm("Switch to $60 per trade with REAL money?")) return;
+      void withBusy(async () => {
+        const r = await api.setTradeSize(usd);
+        message = r.message;
+      });
+    });
+  });
   main.querySelector("#start")?.addEventListener("click", () => {
     void withBusy(async () => {
       await onStartRequestAlerts();
       const r = await api.start();
+      message = r.message;
+    });
+  });
+  main.querySelector("#sweepVault")?.addEventListener("click", () => {
+    void withBusy(async () => {
+      const r = await api.sweepVault();
+      message = r.message;
+    });
+  });
+  main.querySelector("#sellAll")?.addEventListener("click", () => {
+    if (!confirm("Stop buying and SELL every open coin now?")) return;
+    void withBusy(async () => {
+      const r = await api.sellAll();
       message = r.message;
     });
   });
@@ -1234,3 +1281,102 @@ setInterval(() => {
 
 // Warm alert cursor so first events after app open are caught.
 void pollSessionAlerts();
+
+/** Live wallet block: public address + SOL balance + caps. Never any key. */
+function liveRows(status: Record<string, unknown>): string {
+  const live = status.live as
+    | {
+        walletPublicKey?: string | null;
+        solBalance?: number | null;
+        buysHalted?: boolean;
+        todayRealizedUsd?: number;
+        dailyLossLimitHit?: boolean;
+        lastLiveError?: string | null;
+        caps?: { maxPositionUsd?: number; maxOpenPositions?: number; dailyLossLimitUsd?: number };
+      }
+    | null
+    | undefined;
+  if (!live) return "";
+  const pk = live.walletPublicKey ?? "—";
+  const short = pk.length > 12 ? `${pk.slice(0, 4)}…${pk.slice(-4)}` : pk;
+  return `
+      <div class="row"><span class="k">Wallet</span><span class="v">${escapeHtml(short)}</span></div>
+      ${(() => { const v = status.vaultSweep as { addressMasked?: string | null; warning?: string | null } | null | undefined; return v ? `<div class="row"><span class="k">Vault</span><span class="v">${escapeHtml(v.addressMasked ?? v.warning ?? "—")}</span></div>` : ""; })()}
+      <div class="row"><span class="k">SOL balance</span><span class="v">${typeof live.solBalance === "number" ? live.solBalance.toFixed(4) : "—"}</span></div>
+      <div class="row"><span class="k">Live caps</span><span class="v">$${live.caps?.maxPositionUsd ?? "?"}/trade · ${live.caps?.maxOpenPositions ?? "?"} open · −$${live.caps?.dailyLossLimitUsd ?? "?"}/day</span></div>
+      <div class="row"><span class="k">Today (live)</span><span class="v ${live.dailyLossLimitHit ? "warn-text" : ""}">$${(live.todayRealizedUsd ?? 0).toFixed(2)}${live.dailyLossLimitHit ? " · LIMIT HIT" : ""}</span></div>
+      ${live.buysHalted ? `<div class="row"><span class="k">Buys</span><span class="v warn-text">HALTED</span></div>` : ""}
+      ${live.lastLiveError ? `<div class="row"><span class="k">Live error</span><span class="v warn-text">${escapeHtml(live.lastLiveError)}</span></div>` : ""}`;
+}
+
+/** $15 / $30 / $60 hot buttons + big active size. New buys only. */
+function tradeSizeCard(status: Record<string, unknown>): string {
+  const ts = status.tradeSize as
+    | {
+        selectedUsd: number;
+        effectiveUsd: number;
+        warning: string | null;
+        options: { usd: number; enabled: boolean; reason: string | null }[];
+      }
+    | undefined;
+  if (!ts) return "";
+  const btns = ts.options
+    .map(
+      (o) => `<div class="size-opt">
+        <button class="size-btn ${o.usd === ts.selectedUsd ? "active" : ""}" data-size="${o.usd}" ${busy || !o.enabled ? "disabled" : ""}>$${o.usd}</button>
+        ${o.reason ? `<div class="size-why">${escapeHtml(o.reason)}</div>` : ""}
+      </div>`,
+    )
+    .join("");
+  return `
+    <div class="card">
+      <h2>Trade size</h2>
+      <div class="size-big">$${ts.effectiveUsd} <span>per trade</span></div>
+      ${ts.warning ? `<p class="warn-text">${escapeHtml(ts.warning)}</p>` : ""}
+      <div class="size-row">${btns}</div>
+      <p class="muted">Applies to new buys only. Coins already held keep their size.</p>
+    </div>`;
+}
+
+/** Hard daily loss limit — big text: limit, lost today, room left. */
+function hardLossCard(status: Record<string, unknown>): string {
+  const h = status.hardDailyLoss as
+    | { limitUsd: number; todayLossUsd: number; remainingUsd: number; locked: boolean; lockedUntil: number | null; warnings?: string[] }
+    | undefined;
+  if (!h) return "";
+  const until = h.lockedUntil ? new Date(h.lockedUntil).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) : "";
+  return `
+    <div class="card hard-loss ${h.locked ? "locked" : ""}">
+      <h2>Daily loss limit</h2>
+      ${h.locked ? `<div class="hl-lock">🛑 LOCKED — no new buys until midnight ET${until ? ` (${escapeHtml(until)})` : ""}</div>` : ""}
+      <div class="hl-grid">
+        <div><div class="hl-k">Limit</div><div class="hl-v">$${h.limitUsd.toFixed(0)}</div></div>
+        <div><div class="hl-k">Lost today</div><div class="hl-v">$${h.todayLossUsd.toFixed(2)}</div></div>
+        <div><div class="hl-k">Room left</div><div class="hl-v">$${h.remainingUsd.toFixed(2)}</div></div>
+      </div>
+      ${(h.warnings ?? []).map((w) => `<p class="warn-text">${escapeHtml(w)}</p>`).join("")}
+    </div>`;
+}
+
+/** Live vault sweep: masked address + big "Sweep vault now". Destination is set in .env only. */
+function vaultSweepCard(status: Record<string, unknown>): string {
+  const v = status.vaultSweep as
+    | { configured: boolean; addressMasked: string | null; owedSol: number; minSweepSol: number; autoSweep: boolean; pending: { sol: number } | null; stuck: boolean; lastError: string | null; warning: string | null }
+    | null
+    | undefined;
+  if (!v) return "";
+  if (!v.configured) {
+    return `<div class="card"><h2>Vault wallet</h2><p class="warn-text">${escapeHtml(v.warning ?? "Not set")}</p></div>`;
+  }
+  return `
+    <div class="card vault-card">
+      <h2>Vault wallet</h2>
+      <div class="vault-addr">${escapeHtml(v.addressMasked ?? "")}</div>
+      <div class="row"><span class="k">Waiting to sweep</span><span class="v">${v.owedSol.toFixed(4)} SOL</span></div>
+      <div class="row"><span class="k">Auto-sweep</span><span class="v">${v.autoSweep ? "on" : "off"} · min ${v.minSweepSol} SOL</span></div>
+      ${v.pending ? `<div class="row"><span class="k">Pending</span><span class="v">${v.pending.sol.toFixed(4)} SOL confirming…</span></div>` : ""}
+      ${v.stuck ? `<p class="warn-text">⚠️ Sweeps failing — paused. ${escapeHtml(v.lastError ?? "")}</p>` : ""}
+      <button class="sweep-btn" id="sweepVault" ${busy ? "disabled" : ""}>Sweep vault now</button>
+      <p class="muted">Sends only to the address in .env on the laptop. Change it there and restart.</p>
+    </div>`;
+}

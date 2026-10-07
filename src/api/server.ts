@@ -4,6 +4,8 @@
  *
  * Writes that start trading require PAPER_MODE=true.
  */
+import { redactSecrets } from "../live/redact.js";
+import { isJournalModeFilter } from "../journal/journal.js";
 import express from "express";
 import cors from "cors";
 import type { BotEngine } from "../engine/botEngine.js";
@@ -30,6 +32,7 @@ export function createControlApp(engine: BotEngine) {
       ok: true,
       service: "solana-memecoin-bot-control",
       paperMode: engine.cfg.paperMode,
+      tradingMode: engine.tradingMode,
       ts: Date.now(),
     });
   });
@@ -144,6 +147,16 @@ export function createControlApp(engine: BotEngine) {
    * Apply named preset: { "preset": "momentum" | "sniper" }.
    * Requires runner stopped; persists overlay.
    */
+  /** Hot-button trade size: body { usd: 15 | 30 | 60 }. Any mode; new buys only. */
+  app.get("/config/trade-size", (_req, res) => {
+    res.json({ tradeSize: engine.getTradeSize() });
+  });
+  app.post("/config/trade-size", (req, res) => {
+    const body = (req.body ?? {}) as { usd?: unknown };
+    const r = engine.setTradeSize(body.usd);
+    res.status(r.status).json({ ok: r.ok, message: r.message, tradeSize: r.tradeSize });
+  });
+
   app.post("/config/preset", (req, res) => {
     if (!engine.cfg.paperMode) {
       res.status(403).json({
@@ -175,6 +188,8 @@ export function createControlApp(engine: BotEngine) {
       res.json({
         bankrollUsd: engine.cfg.bankrollUsd,
         maxPositionUsd: engine.cfg.maxPositionUsd,
+        tradeSize: engine.getTradeSize(),
+        hardDailyLoss: engine.getHardDailyLoss(),
         vaultUsd: portfolio.vaultUsd,
         tradableCashUsd: portfolio.tradableCashUsd,
         chaseLockout: engine.getChaseLockout(),
@@ -194,8 +209,8 @@ export function createControlApp(engine: BotEngine) {
    * percentOfProfit skims % of max(0, cash − bankrollUsd).
    * Vault survives /runner/reset.
    */
-  app.post("/vault/skim", (req, res) => {
-    if (!engine.cfg.paperMode) {
+  app.post("/vault/skim", async (req, res) => {
+    if (!engine.cfg.paperMode && engine.tradingMode === "paper") {
       res.status(403).json({
         ok: false,
         message:
@@ -204,7 +219,9 @@ export function createControlApp(engine: BotEngine) {
       });
       return;
     }
-    const result = engine.skimToVault(req.body);
+    // Live: also queues a SOL sweep to the env-locked LIVE_VAULT_ADDRESS.
+    // Any destination in the body is ignored.
+    const result = await engine.skimAndSweep(req.body);
     res.status(result.ok ? 200 : 400).json(result);
   });
 
@@ -212,6 +229,15 @@ export function createControlApp(engine: BotEngine) {
    * Return vault → tradable cash (paper convenience).
    * Body: { "amountUsd": number }
    */
+  /**
+   * LIVE: sweep owed vault SOL now. The destination is fixed by LIVE_VAULT_ADDRESS
+   * in .env; the request body is ignored entirely.
+   */
+  app.post("/vault/sweep", async (_req, res) => {
+    const r = await engine.sweepVaultNow();
+    res.status(r.ok ? 200 : 400).json(r);
+  });
+
   app.post("/vault/return", (req, res) => {
     if (!engine.cfg.paperMode) {
       res.status(403).json({
@@ -235,7 +261,7 @@ export function createControlApp(engine: BotEngine) {
   });
 
   app.post("/runner/start", async (req, res) => {
-    if (!engine.cfg.paperMode) {
+    if (!engine.cfg.paperMode && engine.tradingMode === "paper") {
       res.status(403).json({
         ok: false,
         message:
@@ -292,7 +318,7 @@ export function createControlApp(engine: BotEngine) {
     _req: express.Request,
     res: express.Response,
   ): Promise<void> => {
-    if (!engine.cfg.paperMode) {
+    if (!engine.cfg.paperMode && engine.tradingMode === "paper") {
       const portfolio = await engine.getPortfolio();
       res.status(403).json({
         ok: false,
@@ -311,6 +337,20 @@ export function createControlApp(engine: BotEngine) {
     res.status(200).json(result);
   };
   app.post("/runner/exit", exitHandler);
+
+  /**
+   * Kill switch + flatten: halt new buys, then sell every open position
+   * (live: real sells with the retry ladder; paper: paper fills).
+   */
+  app.post("/runner/sell-all", async (_req, res) => {
+    const result = await engine.sellAll();
+    res.status(result.ok ? 200 : 400).json(result);
+  });
+
+  /** Live problem log (failed sells / unconfirmed buys). Never contains keys. */
+  app.get("/live/events", (_req, res) => {
+    res.json({ events: engine.getLiveEvents() });
+  });
   app.post("/position/exit", exitHandler);
 
   /**
@@ -412,7 +452,10 @@ export function createControlApp(engine: BotEngine) {
         ? Math.max(0, Math.floor(offsetRaw))
         : 0;
       // Includes Daily/Weekly/Monthly/Overall P&L summary (USD + quote asset).
-      res.json(await engine.getJournal({ limit, offset }));
+      // ?mode=paper|live_dry_run|live|all (default all) filters rows + P&L summary.
+      const modeQ = req.query.mode;
+      const mode = isJournalModeFilter(modeQ) ? modeQ : undefined;
+      res.json(await engine.getJournal({ limit, offset, mode }));
     } catch (err) {
       next(err);
     }
@@ -466,6 +509,13 @@ export function createControlApp(engine: BotEngine) {
       res.status(500).json({
         error: err instanceof Error ? err.message : String(err),
       });
+    },
+  );
+
+  // Last-resort error handler: never leak stacks, RPC URLs, or key material.
+  app.use(
+    (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+      res.status(500).json({ ok: false, message: redactSecrets(err).slice(0, 300) });
     },
   );
 

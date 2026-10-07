@@ -549,3 +549,40 @@ button.pin-action {
   font-weight: 700;
   margin: 2px 0 4px 5.6rem;
 }
+
+/* Trading mode banner: large, high-contrast, readable without glasses. */
+.mode-banner {
+  margin-top: 12px;
+  padding: 14px 12px;
+  border-radius: 12px;
+  font-size: 2.2rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-align: center;
+  line-height: 1.1;
+  border: 4px solid transparent;
+}
+.mode-paper { background: #14532d; color: #ffffff; border-color: #22c55e; }
+.mode-live_dry_run { background: #78350f; color: #ffffff; border-color: #fbbf24; }
+.mode-live { background: #b91c1c; color: #ffffff; border-color: #ffffff; }
+.mode-unknown { background: #374151; color: #ffffff; }
+
+/* Trade-size hot buttons — large, readable without glasses. */
+.size-big { font-size: 3rem; font-weight: 900; text-align: center; margin: 6px 0 12px; color: #fff; }
+.size-big span { font-size: 1.1rem; font-weight: 600; color: var(--muted); }
+.size-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.size-btn { width: 100%; min-height: 72px; font-size: 1.8rem; font-weight: 900; border-radius: 14px; border: 3px solid #475569; background: #1e293b; color: #fff; }
+.size-btn.active { background: #2563eb; border-color: #fff; }
+.size-btn:disabled { opacity: 0.4; }
+.size-why { font-size: 0.95rem; text-align: center; color: #fbbf24; margin-top: 4px; }
+
+/* Hard daily loss card — large, readable without glasses. */
+.hard-loss .hl-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; text-align: center; }
+.hard-loss .hl-k { font-size: 1rem; color: var(--muted); font-weight: 600; }
+.hard-loss .hl-v { font-size: 2rem; font-weight: 900; color: #fff; }
+.hard-loss.locked { border: 4px solid #ef4444; }
+.hard-loss .hl-lock { background: #b91c1c; color: #fff; font-size: 1.5rem; font-weight: 900; padding: 12px; border-radius: 10px; margin-bottom: 10px; text-align: center; }
+
+.vault-addr { font-size: 2rem; font-weight: 900; text-align: center; letter-spacing: 0.05em; margin: 4px 0 10px; color: #fff; }
+.sweep-btn { width: 100%; min-height: 72px; margin-top: 10px; font-size: 1.7rem; font-weight: 900; border-radius: 14px; border: 3px solid #fff; background: #7c3aed; color: #fff; }
+.sweep-btn:disabled { opacity: 0.4; }
