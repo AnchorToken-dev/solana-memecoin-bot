@@ -36,6 +36,14 @@ const OFF_VIRTUAL_QUOTE = 245;
 
 /** Above this gap (pool real SOL under ~29) we skip: too thin to trust. */
 export const MAX_PUMPSWAP_QUOTE_GAP = 1.6;
+/** Virtual SOL on graduated pump.fun pools (observed 17.58 SOL, Oct 2026). */
+export const TYPICAL_PUMPSWAP_VIRTUAL_QUOTE_SOL = 17.6;
+/**
+ * Real SOL below which live skips a PumpSwap pool as too thin (gap > MAX):
+ * virtual / (MAX − 1) ≈ 29.3 SOL. Paper uses this as an estimate (live reads
+ * the pool's actual virtual reserves on-chain).
+ */
+export const PUMPSWAP_THIN_POOL_FLOOR_SOL = TYPICAL_PUMPSWAP_VIRTUAL_QUOTE_SOL / (MAX_PUMPSWAP_QUOTE_GAP - 1);
 
 export function isSolQuoteMint(mint: string | null | undefined): boolean {
   return mint == null || mint === "" || SOL_QUOTE_ALIASES.has(mint);

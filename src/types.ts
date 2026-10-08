@@ -38,6 +38,12 @@ export interface PaperBrokerParams {
    * fee/slippage (keeps old fixtures exact).
    */
   fees?: PaperFeeSettings;
+  /**
+   * Paper skips coins LIVE can't buy (non-SOL pairs, PumpSwap pools under the
+   * thin-pool floor) and cools those coins down like live. Env
+   * PAPER_SKIP_UNBUYABLE (default on). Absent = off (old fixtures unchanged).
+   */
+  skipUnbuyable?: boolean;
 }
 
 export interface RunnerParams {
@@ -176,6 +182,12 @@ export interface TokenSnapshot {
    * be bought with a SOL PumpPortal tx. Absent = unknown.
    */
   quoteMint?: string;
+  /**
+   * Real SOL in the coin's PumpSwap pool, from DexScreener `liquidity.quote`
+   * (already fetched by Dex enrich — no extra request). Only set for a
+   * SOL-quoted pumpswap pair. Absent = unknown.
+   */
+  poolQuoteSol?: number;
 }
 
 export type Side = "buy" | "sell";
