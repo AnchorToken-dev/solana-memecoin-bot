@@ -61,6 +61,8 @@ import {
 } from "../alerts/sessionEvents.js";
 import { modeLabel, type TradingMode, type LiveSettings } from "../live/mode.js";
 import { dryRunCostModelFromConfig, LiveBroker } from "../live/liveBroker.js";
+import { BuyCooldowns, formatCooldown } from "../live/buyCooldown.js";
+import { classifyReason } from "../live/pumpErrors.js";
 import { loadLiveSigner } from "../live/keypair.js";
 import { HttpsLiveRpc } from "../live/rpc.js";
 import { PumpPortalBuilder } from "../live/pumpportal.js";
@@ -216,6 +218,8 @@ export class BotEngine {
   private liveBroker: LiveBroker | null;
   /** Kill switch: no new buys; exits keep running. */
   private buysHalted = false;
+  /** LIVE: per-coin skip after a failed buy (in memory; restart clears). */
+  readonly buyCooldowns = new BuyCooldowns();
   private liveSolBalance: number | null = null;
   private liveSolBalanceAt: number | null = null;
   private lastLiveError: string | null = null;
@@ -1888,7 +1892,14 @@ export class BotEngine {
       return false;
     }
 
-    const entry = entries[0]!;
+    // LIVE: skip coins whose last buy failed recently (see src/live/buyCooldown.ts).
+    const usable = this.isLiveMode() ? entries.filter((e) => !this.buyCooldowns.blocked(e.mint, now)) : entries;
+    if (usable.length === 0) {
+      log.debug(`Cycle ${cycle}: ${entries.length} entry signal(s), all on buy cooldown after a failed buy`);
+      return false;
+    }
+
+    const entry = usable[0]!;
     // Size off tradable cash only — vault is excluded from ledger.cash after skim.
     const sized = sizePosition(
       {
@@ -1982,12 +1993,19 @@ export class BotEngine {
         // Dry-run cost estimate only (venue fee tier + size-aware slippage); live ignores these.
         ...(liveSnap?.venue ? { venue: liveSnap.venue } : {}),
         ...(liveSnap && liveSnap.liquidityUsd > 0 ? { liquidityUsd: liveSnap.liquidityUsd } : {}),
+        ...(liveSnap?.quoteMint ? { quoteMint: liveSnap.quoteMint } : {}),
       });
       if (!res.ok) {
         // No position recorded → no ghost. Loud only when the chain state is unknown.
         const msg = redactSecrets(res.reason).slice(0, 400);
-        this.lastLiveError = `BUY ${entry.symbol}: ${msg}`;
-        log.warn(`LIVE buy not filled for ${entry.symbol}: ${msg}`);
+        const kind = res.kind ?? classifyReason(res.reason);
+        const cd = this.buyCooldowns.record(entry.mint, entry.symbol, kind, Date.now());
+        const plain = res.plain ? redactSecrets(res.plain).slice(0, 300) : null;
+        this.lastLiveError = `BUY ${entry.symbol}: ${plain ?? msg}`;
+        log.warn(
+          `LIVE buy not filled for ${entry.symbol}: ${plain ? `${plain} — ` : ""}${msg}` +
+            (cd ? ` · skipping this coin for ${formatCooldown(cd.until - Date.now())}${cd.failures > 1 ? ` (failure #${cd.failures})` : ""}` : ""),
+        );
         if (res.unconfirmed) {
           this.events.push(
             "live_buy_unconfirmed",
@@ -2001,6 +2019,8 @@ export class BotEngine {
       }
       fill = res.fill;
       position = { ...res.position, tradeSizeUsd: tradeSize.selectedUsd };
+      this.buyCooldowns.clear(entry.mint);
+      for (const n of res.notes ?? []) log.info(`LIVE buy ${entry.symbol}: ${n}`);
       void this.refreshLiveBalance();
     } else {
       const entrySnap = snaps.find((s) => s.mint === entry.mint);

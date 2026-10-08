@@ -37,6 +37,8 @@ export interface LiveRpc {
   /** Optional (vault sweep): recent blockhash + its expiry height. */
   getLatestBlockhash?(): Promise<{ blockhash: string; lastValidBlockHeight: number }>;
   getBlockHeight?(): Promise<number>;
+  /** Optional (PumpSwap quote fix): raw account data, null if the account doesn't exist. Read-only. */
+  getAccountData?(pubkey: string): Promise<Uint8Array | null>;
 }
 
 export class HttpsLiveRpc implements LiveRpc {
@@ -110,6 +112,15 @@ export class HttpsLiveRpc implements LiveRpc {
 
   async getBlockHeight(): Promise<number> {
     return this.call<number>("getBlockHeight", [{ commitment: "confirmed" }]);
+  }
+
+  async getAccountData(pubkey: string): Promise<Uint8Array | null> {
+    const r = await this.call<{ value: { data: [string, string] } | null }>("getAccountInfo", [
+      pubkey,
+      { encoding: "base64", commitment: "processed" },
+    ]);
+    if (!r.value) return null;
+    return new Uint8Array(Buffer.from(r.value.data[0], "base64"));
   }
 
   async getTransactionMeta(sig: string) {

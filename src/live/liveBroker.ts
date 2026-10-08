@@ -15,7 +15,9 @@ import type { ExitReason, Fill, Position } from "../types.js";
 import type { LiveSigner } from "./keypair.js";
 import type { LiveRpc } from "./rpc.js";
 import type { SwapTxBuilder } from "./pumpportal.js";
-import { signTransaction, txSignature } from "./tx.js";
+import { instructionProgramIds, signTransaction, txSignature } from "./tx.js";
+import { classifyBuildFailure, decodeProgramError, type BuyFailureKind, type DecodedProgramError } from "./pumpErrors.js";
+import { compensateBuy, isSolQuoteMint, MAX_PUMPSWAP_QUOTE_GAP, readPumpSwapQuoteGap } from "./pumpswapPool.js";
 import { computeOnChainDelta, LAMPORTS_PER_SOL } from "./fills.js";
 import { redactSecrets } from "./redact.js";
 import { sellSlippageLadder, type LiveSettings } from "./mode.js";
@@ -30,8 +32,17 @@ import {
 export type LiveExecMode = "live_dry_run" | "live";
 
 export type BuyResult =
-  | { ok: true; fill: Fill; position: Position; signature: string | null; simulated: boolean }
-  | { ok: false; reason: string; signature?: string; unconfirmed?: boolean };
+  | { ok: true; fill: Fill; position: Position; signature: string | null; simulated: boolean; notes?: string[] }
+  | {
+      ok: false;
+      reason: string;
+      signature?: string;
+      unconfirmed?: boolean;
+      /** What went wrong, for the per-coin retry cooldown. */
+      kind?: BuyFailureKind;
+      /** Plain-English reason (decoded program error name etc.). */
+      plain?: string;
+    };
 
 export type SellResult =
   | { ok: true; fill: Fill; proceedsUsd: number; realizedPnlUsd: number; signature: string | null; attempts: number; simulated: boolean; notes: string[] }
@@ -39,7 +50,27 @@ export type SellResult =
 
 type SendOutcome =
   | { ok: true; signature: string }
-  | { ok: false; reason: string; signature?: string; unconfirmed?: boolean };
+  | {
+      ok: false;
+      reason: string;
+      signature?: string;
+      unconfirmed?: boolean;
+      /** build = PumpPortal/sign, simulate = chain refused in simulation (nothing sent), send/confirm = after sending. */
+      stage?: "build" | "simulate" | "send" | "confirm";
+      decoded?: DecodedProgramError | null;
+      kind?: BuyFailureKind;
+      plain?: string;
+    };
+
+/** How a buy is requested from PumpPortal. */
+interface BuyRoute {
+  pool: string;
+  amount: number;
+  slippageBps: number;
+  /** True when the PumpSwap boost quote fix was applied. */
+  compensated: boolean;
+  note?: string;
+}
 
 /**
  * Cost model for LIVE DRY-RUN estimates (nothing hits the chain, so costs are
@@ -108,17 +139,27 @@ export class LiveBroker {
       const unsigned = await this.d.builder.buildTx(req);
       signed = signTransaction(unsigned, this.d.signer);
     } catch (err) {
-      return { ok: false, reason: `build/sign: ${redactSecrets(err)}` };
+      const reason = `build/sign: ${redactSecrets(err)}`;
+      return { ok: false, reason, stage: "build", ...classifyBuildFailure(reason) };
     }
     const b64 = Buffer.from(signed).toString("base64");
     const sig = txSignature(signed);
+    const programIds = instructionProgramIds(signed);
     try {
       const sim = await this.d.rpc.simulate(b64);
       if (sim.err != null) {
-        return { ok: false, reason: `simulation failed: ${redactSecrets(sim.err)}` };
+        const decoded = decodeProgramError(sim.err, sim.logs, programIds);
+        return {
+          ok: false,
+          reason: `simulation failed: ${redactSecrets(sim.err)}`,
+          stage: "simulate",
+          decoded,
+          kind: decoded?.kind ?? "other",
+          plain: decoded ? `${decoded.plain}${decoded.detail ? ` (${decoded.detail})` : ""}` : undefined,
+        };
       }
     } catch (err) {
-      return { ok: false, reason: `simulate: ${redactSecrets(err)}` };
+      return { ok: false, reason: `simulate: ${redactSecrets(err)}`, stage: "simulate", kind: "not_coin_specific" };
     }
     if (this.mode === "live_dry_run") return { ok: true, signature: sig, simulated: true };
 
@@ -128,20 +169,30 @@ export class LiveBroker {
       // Send can error after the node accepted it — still poll before giving up.
       const st = await this.pollConfirm(sig, Math.min(10_000, this.d.settings.confirmTimeoutMs));
       if (st.ok) return { ok: true, signature: sig };
-      return { ok: false, reason: `send: ${redactSecrets(err)}`, signature: sig, unconfirmed: st.unknown };
+      return { ok: false, reason: `send: ${redactSecrets(err)}`, signature: sig, unconfirmed: st.unknown, stage: "send", ...this.afterSendKind(st, programIds) };
     }
     const st = await this.pollConfirm(sig, this.d.settings.confirmTimeoutMs);
     if (st.ok) return { ok: true, signature: sig };
-    return { ok: false, reason: st.reason, signature: sig, unconfirmed: st.unknown };
+    return { ok: false, reason: st.reason, signature: sig, unconfirmed: st.unknown, stage: "confirm", ...this.afterSendKind(st, programIds) };
   }
 
-  private async pollConfirm(sig: string, timeoutMs: number): Promise<{ ok: true } | { ok: false; reason: string; unknown: boolean }> {
+  /** Failure kind once a tx was sent: unknown outcome is "unconfirmed" (never re-buy fast). */
+  private afterSendKind(
+    st: { ok: false; reason: string; unknown: boolean; err?: unknown },
+    programIds: (string | null)[] | null,
+  ): { kind: BuyFailureKind; decoded?: DecodedProgramError | null; plain?: string } {
+    if (st.unknown) return { kind: "unconfirmed" };
+    const decoded = st.err != null ? decodeProgramError(st.err, null, programIds) : null;
+    return { kind: decoded?.kind ?? "other", decoded, ...(decoded ? { plain: decoded.plain } : {}) };
+  }
+
+  private async pollConfirm(sig: string, timeoutMs: number): Promise<{ ok: true } | { ok: false; reason: string; unknown: boolean; err?: unknown }> {
     const deadline = this.now() + timeoutMs;
     for (;;) {
       try {
         const s = await this.d.rpc.getSignatureStatus(sig);
         if (s) {
-          if (s.err != null) return { ok: false, reason: `on-chain error: ${redactSecrets(s.err)}`, unknown: false };
+          if (s.err != null) return { ok: false, reason: `on-chain error: ${redactSecrets(s.err)}`, unknown: false, err: s.err };
           if (s.confirmationStatus === "confirmed" || s.confirmationStatus === "finalized") return { ok: true };
         }
       } catch {
@@ -174,6 +225,8 @@ export class LiveBroker {
     /** Dry-run cost model only: where the coin trades + pool liquidity (USD). */
     venue?: PaperVenue;
     liquidityUsd?: number;
+    /** Coin's quote mint when the market data knows it (pump.fun `quote_mint`). */
+    quoteMint?: string | null;
   }): Promise<BuyResult> {
     const s = this.d.settings;
     const notionalUsd = Math.min(args.notionalUsd, s.maxPositionUsd);
@@ -190,18 +243,67 @@ export class LiveBroker {
     if (balance < needed) {
       return { ok: false, reason: `insufficient SOL: have ${balance.toFixed(4)}, need ${needed.toFixed(4)} (incl. reserve ${s.minSolReserve})` };
     }
+    if (!isSolQuoteMint(args.quoteMint)) {
+      return {
+        ok: false,
+        reason: `unsupported quote mint ${String(args.quoteMint).slice(0, 6)}…`,
+        kind: "unsupported_quote",
+        plain: "coin is paired with a non-SOL token (e.g. PUMP, USDC or a tokenized stock); PumpPortal can't buy it with SOL",
+      };
+    }
     const buyPrio = Math.min(s.priorityFeeSol, s.priorityFeeMaxSol);
-    const out = await this.execute({
-      publicKey: this.d.signer.publicKey,
-      action: "buy",
-      mint: args.mint,
-      amount: solAmount,
-      denominatedInSol: true,
-      slippageBps: s.slippageBps,
-      priorityFeeSol: buyPrio,
-      pool: s.pool,
-    });
-    if (!out.ok) return out;
+    const notes: string[] = [];
+    const plain = { amount: solAmount, slippageBps: s.slippageBps, compensated: false };
+    let route: BuyRoute = { pool: s.pool, ...plain };
+    // Graduated coin → PumpSwap explicitly (PumpPortal "auto" can still route a just-graduated coin to the curve).
+    if (s.pool === "pump-amm" || (s.pool === "auto" && args.venue === "pumpswap")) {
+      const ps = await this.pumpSwapRoute(args.mint, solAmount);
+      if (!ps.ok) return ps.failure;
+      route = ps.route ?? route;
+    }
+    const send = (r: BuyRoute) =>
+      this.execute({
+        publicKey: this.d.signer.publicKey,
+        action: "buy",
+        mint: args.mint,
+        amount: r.amount,
+        denominatedInSol: true,
+        slippageBps: r.slippageBps,
+        priorityFeeSol: buyPrio,
+        pool: r.pool,
+      });
+    let out = await send(route);
+    // One retry, only when the chain refused it in SIMULATION (nothing was sent), the
+    // coin turned out to be on PumpSwap, and the boost quote fix wasn't applied yet.
+    if (
+      !out.ok &&
+      out.stage === "simulate" &&
+      !route.compensated &&
+      (s.pool === "auto" || s.pool === "pump-amm") &&
+      (out.decoded?.kind === "migrated" || (out.decoded?.program === "pumpswap" && out.decoded.kind === "slippage"))
+    ) {
+      const first = out;
+      const ps = await this.pumpSwapRoute(args.mint, solAmount);
+      if (!ps.ok) return ps.failure;
+      if (ps.route && (ps.route.compensated || first.decoded?.kind === "migrated")) {
+        notes.push(`retried on PumpSwap after: ${first.plain ?? first.reason}`);
+        route = ps.route;
+        out = await send(route);
+      }
+    }
+    if (!out.ok) {
+      return {
+        ok: false,
+        reason: out.reason,
+        ...(out.signature ? { signature: out.signature } : {}),
+        ...(out.unconfirmed ? { unconfirmed: true } : {}),
+        ...(out.kind ? { kind: out.kind } : {}),
+        ...(out.plain ? { plain: notes.length ? `${out.plain} [${notes.join("; ")}]` : out.plain } : {}),
+      };
+    }
+    if (route.note) notes.push(route.note);
+    // Dry-run cost model: price the venue the tx actually used.
+    const costVenue: PaperVenue | undefined = route.pool === "pump-amm" ? "pumpswap" : args.venue;
 
     const now = this.now();
     const positionId = randomUUID();
@@ -219,7 +321,7 @@ export class LiveBroker {
         notionalUsd,
         markPrice: args.markPrice,
         solUsd: args.solUsd,
-        venue: args.venue,
+        venue: costVenue,
         liquidityUsd: args.liquidityUsd,
         flatSlippageBps: realistic.flatSlippageBps,
       });
@@ -283,7 +385,62 @@ export class LiveBroker {
         ? { entryLiquidityUsd: args.liquidityUsd }
         : {}),
     };
-    return { ok: true, fill, position, signature: fill.signature ?? null, simulated: !!out.simulated };
+    return {
+      ok: true,
+      fill,
+      position,
+      signature: fill.signature ?? null,
+      simulated: !!out.simulated,
+      ...(notes.length ? { notes } : {}),
+    };
+  }
+
+  /**
+   * PumpSwap buy request with PumpPortal's boost-pool quote corrected
+   * (see pumpswapPool.ts). route null = couldn't read the canonical SOL pool →
+   * caller keeps its uncorrected request. Max SOL spend never increases.
+   */
+  private async pumpSwapRoute(
+    mint: string,
+    solAmount: number,
+  ): Promise<{ ok: true; route: BuyRoute | null } | { ok: false; failure: Extract<BuyResult, { ok: false }> }> {
+    const s = this.d.settings;
+    const read = this.d.rpc.getAccountData?.bind(this.d.rpc);
+    if (!read) return { ok: true, route: null };
+    let gap;
+    try {
+      gap = await readPumpSwapQuoteGap(read, mint);
+    } catch {
+      return { ok: true, route: null };
+    }
+    if (!gap) return { ok: true, route: null };
+    if (!(gap.ratio <= MAX_PUMPSWAP_QUOTE_GAP)) {
+      return {
+        ok: false,
+        failure: {
+          ok: false,
+          reason: `PumpSwap pool too thin (real ${gap.realQuoteSol.toFixed(1)} SOL)`,
+          kind: "pool_too_thin",
+          plain: `PumpSwap pool holds only ${gap.realQuoteSol.toFixed(1)} SOL of real liquidity — too thin to buy safely`,
+        },
+      };
+    }
+    const c = compensateBuy(solAmount, s.slippageBps, gap.ratio);
+    const compensated = c.amount !== solAmount;
+    return {
+      ok: true,
+      route: {
+        pool: "pump-amm",
+        amount: c.amount,
+        slippageBps: c.slippageBps,
+        compensated,
+        ...(compensated
+          ? {
+              note: `PumpSwap boost quote fix: pool ${gap.realQuoteSol.toFixed(1)} SOL real + ${gap.virtualQuoteSol.toFixed(1)} virtual (gap ${((gap.ratio - 1) * 100).toFixed(1)}%); asked ${c.amount} SOL @ ${(c.slippageBps / 100).toFixed(2)}%, SOL cap unchanged`,
+            }
+          : {}),
+      },
+    };
   }
 
   async sell(args: { position: Position; markPrice: number; reason: ExitReason; solUsd: number }): Promise<SellResult> {

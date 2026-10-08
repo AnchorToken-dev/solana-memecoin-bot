@@ -170,6 +170,12 @@ export interface TokenSnapshot {
    * From Pump.fun `complete` or DexScreener dexId. Absent = unknown.
    */
   venue?: PaperVenue;
+  /**
+   * Token the coin is paired with (Pump.fun `quote_mint`). SOL coins report
+   * the System Program id. A non-SOL pair (PUMP, USDC, tokenized stock) can't
+   * be bought with a SOL PumpPortal tx. Absent = unknown.
+   */
+  quoteMint?: string;
 }
 
 export type Side = "buy" | "sell";

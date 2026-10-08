@@ -76,6 +76,8 @@ interface PumpCoin {
   creator?: string;
   bonding_curve?: string;
   associated_bonding_curve?: string;
+  /** Token the coin is paired with. SOL coins report the System Program id (or omit it). */
+  quote_mint?: string | null;
 }
 
 interface PriceSample {
@@ -427,6 +429,7 @@ export class PumpFunMarketData {
       ...(creator ? { creator } : {}),
       ...(bondingCurve ? { bondingCurve } : {}),
       ...(associatedBondingCurve ? { associatedBondingCurve } : {}),
+      ...(typeof coin.quote_mint === "string" && coin.quote_mint ? { quoteMint: coin.quote_mint } : {}),
       // Graduated (complete) coins trade on PumpSwap; others on the curve.
       ...(typeof coin.complete === "boolean"
         ? { venue: coin.complete ? ("pumpswap" as const) : ("bonding_curve" as const) }
