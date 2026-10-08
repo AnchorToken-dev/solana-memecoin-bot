@@ -63,6 +63,7 @@ import { modeLabel, type TradingMode, type LiveSettings } from "../live/mode.js"
 import { dryRunCostModelFromConfig, LiveBroker } from "../live/liveBroker.js";
 import { BuyCooldowns, formatCooldown } from "../live/buyCooldown.js";
 import { classifyReason } from "../live/pumpErrors.js";
+import { checkPaperBuyable } from "../risk/paperBuyable.js";
 import { loadLiveSigner } from "../live/keypair.js";
 import { HttpsLiveRpc } from "../live/rpc.js";
 import { PumpPortalBuilder } from "../live/pumpportal.js";
@@ -218,7 +219,10 @@ export class BotEngine {
   private liveBroker: LiveBroker | null;
   /** Kill switch: no new buys; exits keep running. */
   private buysHalted = false;
-  /** LIVE: per-coin skip after a failed buy (in memory; restart clears). */
+  /**
+   * Per-coin skip after a failed LIVE buy, or (paper, PAPER_SKIP_UNBUYABLE)
+   * after paper skipped a coin live can't buy. In memory; restart clears.
+   */
   readonly buyCooldowns = new BuyCooldowns();
   private liveSolBalance: number | null = null;
   private liveSolBalanceAt: number | null = null;
@@ -1892,10 +1896,25 @@ export class BotEngine {
       return false;
     }
 
-    // LIVE: skip coins whose last buy failed recently (see src/live/buyCooldown.ts).
-    const usable = this.isLiveMode() ? entries.filter((e) => !this.buyCooldowns.blocked(e.mint, now)) : entries;
+    // Skip coins whose last buy failed / was unbuyable recently (see src/live/buyCooldown.ts).
+    // LIVE always; paper when PAPER_SKIP_UNBUYABLE is on (default).
+    const paperRealism = !this.isLiveMode() && cfg.paperBroker.skipUnbuyable === true;
+    const useCooldown = this.isLiveMode() || paperRealism;
+    let usable = useCooldown ? entries.filter((e) => !this.buyCooldowns.blocked(e.mint, now)) : entries;
+    if (paperRealism) {
+      // Paper: drop coins live can't buy (non-SOL pair, thin PumpSwap pool). Scan data only — no requests.
+      usable = usable.filter((e) => {
+        const chk = checkPaperBuyable(snaps.find((s) => s.mint === e.mint));
+        if (chk.ok) return true;
+        const cd = this.buyCooldowns.record(e.mint, e.symbol, chk.kind, now);
+        log.info(
+          `Skip entry ${e.symbol}: ${chk.reason} (${chk.detail})${cd ? ` · skipping this coin for ${formatCooldown(cd.until - now)}` : ""}`,
+        );
+        return false;
+      });
+    }
     if (usable.length === 0) {
-      log.debug(`Cycle ${cycle}: ${entries.length} entry signal(s), all on buy cooldown after a failed buy`);
+      log.debug(`Cycle ${cycle}: ${entries.length} entry signal(s), none buyable right now (cooldown / unbuyable)`);
       return false;
     }
 

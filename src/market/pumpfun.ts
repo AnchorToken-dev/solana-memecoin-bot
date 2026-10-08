@@ -146,6 +146,27 @@ export function liquidityFromPumpCoin(
   return Math.max(0, sol * solPriceUsd);
 }
 
+const WSOL = "So11111111111111111111111111111111111111112";
+
+/**
+ * Pairing + pool depth from a DexScreener pair we already fetched (no extra
+ * request): quote mint, and real SOL in a SOL-quoted pumpswap pool.
+ */
+export function dexPoolFields(p: {
+  dexId?: string;
+  quoteToken?: { address?: string };
+  liquidity?: { quote?: number };
+}): { quoteMint?: string; poolQuoteSol?: number } {
+  const quoteMint = p.quoteToken?.address;
+  const out: { quoteMint?: string; poolQuoteSol?: number } = {};
+  if (quoteMint) out.quoteMint = quoteMint;
+  const q = p.liquidity?.quote;
+  if ((p.dexId ?? "").toLowerCase() === "pumpswap" && quoteMint === WSOL && typeof q === "number" && Number.isFinite(q) && q >= 0) {
+    out.poolQuoteSol = q;
+  }
+  return out;
+}
+
 export class PumpFunMarketData {
   private readonly apiBase: string;
   private readonly fetchImpl: FetchLike;
@@ -490,6 +511,9 @@ export class PumpFunMarketData {
               volume24hUsd: pair.volume24hUsd || s.volume24hUsd,
               liquidityUsd:
                 pair.liquidityUsd > 0 ? pair.liquidityUsd : s.liquidityUsd,
+              // pump.fun's quote_mint wins; Dex fills it in when the list didn't say.
+              ...(!s.quoteMint && pair.quoteMint ? { quoteMint: pair.quoteMint } : {}),
+              ...(pair.poolQuoteSol != null ? { poolQuoteSol: pair.poolQuoteSol } : {}),
             };
           }
         } catch (err) {
@@ -516,6 +540,10 @@ export class PumpFunMarketData {
     symbol?: string;
     name?: string;
     createdAt?: number;
+    /** Pair's quote token mint (e.g. wSOL). */
+    quoteMint?: string;
+    /** Real quote-token amount in a pumpswap pool (DexScreener liquidity.quote). */
+    poolQuoteSol?: number;
   } | null> {
     const res = await this.http(
       `https://api.dexscreener.com/latest/dex/tokens/${mint}`,
@@ -528,16 +556,18 @@ export class PumpFunMarketData {
         chainId?: string;
         dexId?: string;
         baseToken?: { address?: string; symbol?: string; name?: string };
+        quoteToken?: { address?: string };
         priceUsd?: string;
-        liquidity?: { usd?: number };
+        liquidity?: { usd?: number; quote?: number };
         volume?: { h24?: number; m5?: number };
         priceChange?: { m5?: number; h1?: number };
         pairCreatedAt?: number;
       }>;
     };
     const pairs = (body.pairs ?? []).filter((p) => p.chainId === "solana");
-    // Prefer pumpfun / pumpswap pools; else deepest Solana pool.
+    // Prefer a funded pumpswap pool (graduated coin), then pumpfun / pumpswap; else deepest Solana pool.
     const preferred =
+      pairs.find((p) => (p.dexId ?? "").toLowerCase() === "pumpswap" && (p.liquidity?.usd ?? 0) > 0) ??
       pairs.find((p) => PUMP_DEX_IDS.has((p.dexId ?? "").toLowerCase())) ??
       pairs.sort(
         (a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0),
@@ -565,6 +595,7 @@ export class PumpFunMarketData {
         : {}),
       ...(preferred.baseToken?.name ? { name: preferred.baseToken.name } : {}),
       ...(createdAt != null ? { createdAt } : {}),
+      ...dexPoolFields(preferred),
     };
   }
 
@@ -591,8 +622,9 @@ export class PumpFunMarketData {
             chainId?: string;
             dexId?: string;
             baseToken?: { address?: string; symbol?: string; name?: string };
+            quoteToken?: { address?: string };
             priceUsd?: string;
-            liquidity?: { usd?: number };
+            liquidity?: { usd?: number; quote?: number };
             volume?: { h24?: number; m5?: number };
             priceChange?: { m5?: number };
             pairCreatedAt?: number;
@@ -624,6 +656,7 @@ export class PumpFunMarketData {
             timestamp: Date.now(),
             ...(createdAt != null ? { createdAt } : {}),
             venue: dex === "pumpswap" ? "pumpswap" : "bonding_curve",
+            ...dexPoolFields(p),
           });
           if (byMint.size >= limit) break;
         }

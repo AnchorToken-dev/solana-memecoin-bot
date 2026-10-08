@@ -40,6 +40,7 @@ const ConfigSchema = z.object({
   paperBroker: z.object({
     slippageBps: z.number().nonnegative(),
     feeBps: z.number().nonnegative(),
+    skipUnbuyable: z.boolean().optional(),
     fees: z
       .object({
         model: z.enum(["realistic", "legacy"]),
@@ -521,6 +522,10 @@ export function loadConfig(opts?: {
       feeBps: envNum("FEE_BPS", file.paperBroker?.feeBps ?? 30),
       // Itemised realistic costs (env only). PAPER_FEE_MODEL=legacy → old flat model.
       fees: loadPaperFeeSettings(process.env),
+      // Skip coins live can't buy (non-SOL pairs, thin PumpSwap pools). Default on.
+      skipUnbuyable: !["false", "0", "no", "off"].includes(
+        (process.env.PAPER_SKIP_UNBUYABLE ?? "").trim().toLowerCase(),
+      ),
     },
     runner: {
       pollIntervalMs: envNum(
