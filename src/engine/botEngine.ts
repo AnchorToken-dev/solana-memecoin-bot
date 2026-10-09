@@ -64,6 +64,9 @@ import { dryRunCostModelFromConfig, LiveBroker } from "../live/liveBroker.js";
 import { BuyCooldowns, formatCooldown } from "../live/buyCooldown.js";
 import { classifyReason } from "../live/pumpErrors.js";
 import { checkPaperBuyable } from "../risk/paperBuyable.js";
+import { positionsFileName, type PositionLevels } from "../ledger/positionStore.js";
+import { planReconciliation, type BotBuyEvent } from "../live/reconcile.js";
+import { randomUUID } from "node:crypto";
 import {
   checkEntryCash,
   checkLiveWalletFunds,
@@ -164,6 +167,45 @@ export interface EngineStatus {
    * the buy instead. null = buying normally.
    */
   buyingPaused: BuyingPausedStatus | null;
+  /**
+   * Restart safety: positions restored from disk at boot and the result of the
+   * LIVE wallet reconciliation at runner start (adopted / missing). null = nothing to report.
+   */
+  positionRecovery: PositionRecoveryStatus | null;
+}
+
+export interface PositionRecoveryStatus {
+  /** Positions loaded from the open-positions file when this process started. */
+  restored: Array<{ mint: string; symbol: string; qty: number; openedAt: number }>;
+  restoredAt: number | null;
+  /** Positions file unreadable (moved aside); reconciliation is the backstop. */
+  restoreError: string | null;
+  /** Last LIVE wallet reconciliation (null until a live start). */
+  reconciledAt: number | null;
+  adopted: Array<{ mint: string; symbol: string; qty: number; entryPrice: number; entrySource: string }>;
+  missing: Array<{ mint: string; symbol: string; qty: number }>;
+  adjusted: Array<{ mint: string; symbol: string; fromQty: number; toQty: number }>;
+  /** Bot-bought coins still in the wallet that were not adopted (and why). */
+  notAdopted: Array<{ mint: string; symbol: string; why: string }>;
+  /** Wallet coins the bot never bought — left alone. */
+  ignoredUnrelatedMints: number;
+  /** Wallet read failed (plain, redacted). */
+  reconcileError: string | null;
+  /** Plain-English lines for the app / alerts. */
+  messages: string[];
+}
+
+export interface OpenPositionsReport {
+  tradingMode: TradingMode;
+  modeLabel: "PAPER" | "LIVE DRY-RUN" | "LIVE";
+  runnerState: RunnerState;
+  /** true = no open positions in this process (safe to restart / stop). */
+  flat: boolean;
+  count: number;
+  /** Where positions are saved (relative to the data dir when possible). */
+  positionsFile: string | null;
+  positions: Array<Position & { levels: PositionLevels; lastMark: number | null; unrealizedPnlUsd: number | null }>;
+  positionRecovery: PositionRecoveryStatus | null;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -244,6 +286,7 @@ export class BotEngine {
   private cashBlock: Extract<EntryFundsCheck, { ok: false }> | null = null;
   private walletBlock: Extract<EntryFundsCheck, { ok: false }> | null = null;
   private buyingPaused: BuyingPausedStatus | null = null;
+  private positionRecovery: PositionRecoveryStatus | null = null;
   private readonly sellFailAlerted = new Set<string>();
   readonly tradeSizeStore: TradeSizeStore;
   readonly hardLossStore: HardDailyLossStore;
@@ -320,6 +363,7 @@ export class BotEngine {
     } else {
       this.solanaWs = null;
     }
+    this.restoreOpenPositions();
     this.loadPinnedMint();
     // Optional listen-only WSS. Fail-soft: never blocks paper/HTTPS paths.
     if (this.solanaWs) {
@@ -377,7 +421,216 @@ export class BotEngine {
       hardDailyLoss: this.getHardDailyLoss(),
       vaultSweep: this.getVaultSweepStatus(),
       buyingPaused: this.buyingPaused,
+      positionRecovery: this.positionRecovery,
     };
+  }
+
+  /** Exit levels for a position under the current config (informational). */
+  positionLevels(p: Position): PositionLevels {
+    const c = this.cfg;
+    const tt = c.trailingTakeProfit;
+    return {
+      stopLossPrice: p.entryPrice * (1 - c.stopLossPct / 100),
+      takeProfitPrice: c.takeProfitPct > 0 ? p.entryPrice * (1 + c.takeProfitPct / 100) : null,
+      trailActivatePrice: tt && tt.activatePct > 0 ? p.entryPrice * (1 + tt.activatePct / 100) : null,
+      trailStopPrice: tt && p.trailArmed ? p.highWaterPrice * (1 - tt.distancePct / 100) : null,
+      maxHoldUntil: c.maxHoldMinutes > 0 ? p.openedAt + c.maxHoldMinutes * 60_000 : null,
+    };
+  }
+
+  private emptyRecovery(): PositionRecoveryStatus {
+    return {
+      restored: [], restoredAt: null, restoreError: null, reconciledAt: null, adopted: [], missing: [], adjusted: [],
+      notAdopted: [], ignoredUnrelatedMints: 0, reconcileError: null, messages: [],
+    };
+  }
+
+  /**
+   * Boot: persist open positions to a mode-scoped file from now on and load
+   * whatever a previous process left open, so exits resume where they were.
+   */
+  private restoreOpenPositions(): void {
+    const mode = this.tradingMode;
+    this.ledger.enablePositionPersistence({
+      path: join(this.ledger.directory, positionsFileName(mode)),
+      mode,
+      levels: (p) => this.positionLevels(p),
+    });
+    const r = this.ledger.restorePositions();
+    if (!r.ok) {
+      const rec = this.emptyRecovery();
+      rec.restoreError = r.error;
+      const msg = `Saved open positions could not be read (${r.error})${r.movedTo ? "; the file was kept aside" : ""}. ${mode === "live" ? "The wallet check at start will look for coins the bot bought." : "Check your positions."}`;
+      rec.messages.push(msg);
+      this.positionRecovery = rec;
+      log.error(msg);
+      this.events.push("positions_restore_failed", "⚠️ Saved positions unreadable", msg, {});
+      return;
+    }
+    if (r.restored.length === 0) return;
+    const rec = this.emptyRecovery();
+    rec.restoredAt = Date.now();
+    rec.restored = r.restored.map((p) => ({ mint: p.mint, symbol: p.symbol, qty: p.qty, openedAt: p.openedAt }));
+    const names = r.restored.map((p) => p.symbol).join(", ");
+    const msg = `Picked up ${r.restored.length} open position(s) saved before the restart: ${names}. Exits (stop / take-profit / trailing / max-hold) resume when the runner starts.`;
+    rec.messages.push(msg);
+    this.positionRecovery = rec;
+    log.warn(msg);
+    this.events.push("positions_restored", "♻️ Open positions restored", msg, { count: r.restored.length });
+  }
+
+  /** Write the positions file now (graceful shutdown). */
+  flushOpenPositions(): void {
+    this.ledger.flushPositions();
+  }
+
+  /** GET /positions — open positions with exit levels, so a restart can confirm "flat". */
+  getOpenPositionsReport(): OpenPositionsReport {
+    const positions = this.ledger.openPositions.map((p) => {
+      const mark = this.lastMarks.get(p.mint) ?? null;
+      return {
+        ...p,
+        levels: this.positionLevels(p),
+        lastMark: mark,
+        unrealizedPnlUsd: mark != null ? p.qty * mark - p.entryNotionalUsd : null,
+      };
+    });
+    const file = this.ledger.positionsFilePath;
+    return {
+      tradingMode: this.tradingMode,
+      modeLabel: modeLabel(this.tradingMode),
+      runnerState: this.state,
+      flat: positions.length === 0,
+      count: positions.length,
+      positionsFile: file ? file.replace(`${this.cfg.ledgerDir}`, "data").replace(/\\/g, "/") : null,
+      positions,
+      positionRecovery: this.positionRecovery,
+    };
+  }
+
+  /**
+   * LIVE (real money) start: compare restored positions with the wallet's
+   * token balances and adopt coins the bot bought but lost track of. Never
+   * sends anything; never touches tokens the bot didn't buy. Fail-soft.
+   */
+  private async reconcileLiveWallet(): Promise<void> {
+    if (this.tradingMode !== "live" || !this.liveBroker) return;
+    const rec = this.positionRecovery ?? this.emptyRecovery();
+    rec.reconciledAt = Date.now();
+    rec.adopted = [];
+    rec.missing = [];
+    rec.adjusted = [];
+    rec.notAdopted = [];
+    rec.reconcileError = null;
+    rec.messages = rec.messages.filter((m) => m.startsWith("Picked up") || m.startsWith("Saved open positions"));
+    this.positionRecovery = rec;
+    let wallet: Map<string, { qty: number; programIds: string[] }>;
+    try {
+      wallet = await this.liveBroker.getWalletTokenBalances();
+    } catch (err) {
+      rec.reconcileError = redactSecrets(err).slice(0, 300);
+      const msg = `Couldn't check the wallet's coins at start (${rec.reconcileError}). Saved positions are still managed; coins the bot lost track of were NOT looked for — check the wallet.`;
+      rec.messages.push(msg);
+      log.error(msg);
+      this.events.push("reconcile_failed", "⚠️ Wallet check failed", msg, {});
+      return;
+    }
+    const events: BotBuyEvent[] = this.journal.listEvents().map((e) => ({
+      kind: e.kind, mint: e.mint, symbol: e.symbol, signature: e.signature ?? null, timestamp: e.timestamp,
+    }));
+    const now = Date.now();
+    const plan = planReconciliation({ now, positions: this.ledger.openPositions, wallet, fills: this.ledger.readAllFills(), events });
+    rec.ignoredUnrelatedMints = plan.ignoredUnrelated;
+
+    for (const pos of plan.missing) {
+      if (!this.ledger.dropPosition(pos, "reconciled_missing")) continue;
+      rec.missing.push({ mint: pos.mint, symbol: pos.symbol, qty: pos.qty });
+      const msg = `${pos.symbol}: the bot had an open position, but the wallet no longer holds these tokens (sold by hand?). Closed as "reconciled_missing" — no sell was attempted and no profit/loss was booked.`;
+      rec.messages.push(msg);
+      try {
+        this.journal.appendEvent({ kind: "reconciled_missing", symbol: pos.symbol, mint: pos.mint, detail: msg, signature: pos.entrySignature ?? null });
+      } catch {
+        /* ignore */
+      }
+      log.warn(msg);
+      this.events.push("position_missing", "⚠️ Position not in wallet", msg, { mint: pos.mint, symbol: pos.symbol });
+    }
+    for (const { position, walletQty } of plan.adjusted) {
+      const ratio = walletQty / position.qty;
+      const updated: Position = {
+        ...position,
+        qty: walletQty,
+        entryNotionalUsd: position.entryNotionalUsd * ratio,
+        entryFeesUsd: position.entryFeesUsd * ratio,
+      };
+      this.ledger.replacePosition(updated);
+      rec.adjusted.push({ mint: position.mint, symbol: position.symbol, fromQty: position.qty, toQty: walletQty });
+      const msg = `${position.symbol}: the wallet holds fewer tokens than recorded (${walletQty} vs ${position.qty}); now tracking the wallet amount.`;
+      rec.messages.push(msg);
+      log.warn(msg);
+      this.events.push("position_adjusted", "⚠️ Position size corrected", msg, { mint: position.mint });
+    }
+    for (const sk of plan.skipped) rec.notAdopted.push(sk);
+    for (const c of plan.adopt) {
+      let entryPrice: number;
+      let entrySource: "live_buy_fill" | "unconfirmed_buy_mark";
+      let entryFeesUsd = 0;
+      let openedAt: number;
+      let signature: string | null;
+      if (c.fill && c.fill.price > 0) {
+        entryPrice = c.fill.price;
+        entrySource = "live_buy_fill";
+        entryFeesUsd = c.fill.qty > 0 ? c.fill.feesUsd * Math.min(1, c.walletQty / c.fill.qty) : 0;
+        openedAt = c.fill.timestamp;
+        signature = c.fill.signature ?? null;
+      } else {
+        const mark = await this.market.getPrice(c.mint).catch(() => null);
+        if (mark == null || !(mark > 0)) {
+          const why = "the bot sent a buy for it but has no price for it right now — not adopted; check it and sell by hand if needed";
+          rec.notAdopted.push({ mint: c.mint, symbol: c.symbol, why });
+          rec.messages.push(`${c.symbol}: ${why}.`);
+          this.events.push("orphan_not_adopted", "⚠️ Coin not adopted", `${c.symbol}: ${why}.`, { mint: c.mint });
+          continue;
+        }
+        if (c.walletQty * mark < 0.5) {
+          rec.notAdopted.push({ mint: c.mint, symbol: c.symbol, why: "worth under $0.50 (dust)" });
+          continue;
+        }
+        entryPrice = mark;
+        entrySource = "unconfirmed_buy_mark";
+        openedAt = c.event?.timestamp ?? now;
+        signature = c.event?.signature ?? null;
+      }
+      const note =
+        entrySource === "live_buy_fill"
+          ? `adopted at start: wallet held ${c.walletQty} tokens from the bot's buy ${signature ? signature.slice(0, 8) + "…" : ""} (entry = that buy's fill price)`
+          : `adopted at start: wallet held ${c.walletQty} tokens from a buy the bot sent but never confirmed (entry = current price)`;
+      const position: Position = {
+        id: randomUUID(),
+        mint: c.mint,
+        symbol: c.symbol,
+        side: "long",
+        qty: c.walletQty,
+        entryPrice,
+        entryNotionalUsd: c.walletQty * entryPrice,
+        entryFeesUsd,
+        highWaterPrice: entryPrice,
+        trailArmed: false,
+        openedAt,
+        entrySignature: signature,
+        mode: "live",
+        adopted: { at: now, entrySource, note },
+      };
+      this.ledger.adoptPosition(position);
+      rec.adopted.push({ mint: c.mint, symbol: c.symbol, qty: c.walletQty, entryPrice, entrySource });
+      const msg = `${c.symbol}: found ${c.walletQty} tokens in the wallet that the bot bought but wasn't tracking. Now managing them with the normal exits (stop / take-profit / trailing / max-hold).`;
+      rec.messages.push(msg);
+      log.warn(msg);
+      this.events.push("position_adopted", "♻️ Orphan coin adopted", msg, { mint: c.mint, symbol: c.symbol });
+    }
+    if (plan.missing.length + plan.adjusted.length + rec.adopted.length === 0) {
+      log.info(`LIVE wallet check: positions match the wallet (${plan.ignoredUnrelated} unrelated coin(s) left alone)`);
+    }
   }
 
   /**
@@ -1436,6 +1689,8 @@ export class BotEngine {
         return { ok: false, message: b.message, status: this.getStatus() };
       }
       await this.refreshLiveBalance();
+      // Restart safety: match saved positions to the wallet; adopt coins the bot bought but lost.
+      if (this.state === "stopped") await this.reconcileLiveWallet();
     }
     this.buysHalted = false;
     if (opts?.reset) {
@@ -2179,7 +2434,12 @@ export class BotEngine {
         return false;
       }
       fill = res.fill;
-      position = { ...res.position, tradeSizeUsd: tradeSize.selectedUsd };
+      position = {
+        ...res.position,
+        tradeSizeUsd: tradeSize.selectedUsd,
+        entrySignature: res.fill.signature ?? null,
+        mode: this.tradingMode,
+      };
       this.buyCooldowns.clear(entry.mint);
       for (const n of res.notes ?? []) log.info(`LIVE buy ${entry.symbol}: ${n}`);
       void this.refreshLiveBalance();
@@ -2195,7 +2455,7 @@ export class BotEngine {
         ...(entrySnap?.venue ? { venue: entrySnap.venue } : {}),
         ...(entrySnap && entrySnap.liquidityUsd > 0 ? { liquidityUsd: entrySnap.liquidityUsd } : {}),
       }));
-      position = { ...position, tradeSizeUsd: tradeSize.selectedUsd };
+      position = { ...position, tradeSizeUsd: tradeSize.selectedUsd, mode: "paper" };
     }
     ledger.recordBuy(fill, position);
     log.info(`Entry signal: ${entry.reason}`);

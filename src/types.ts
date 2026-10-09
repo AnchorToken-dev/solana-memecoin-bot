@@ -197,7 +197,9 @@ export type ExitReason =
   | "trailing_take_profit"
   | "time_stop"
   | "manual_exit"
-  | "risk_flat";
+  | "risk_flat"
+  /** Restored position whose tokens were no longer in the wallet at live start (no sell attempted). */
+  | "reconciled_missing";
 
 export interface Position {
   id: string;
@@ -218,6 +220,20 @@ export interface Position {
   entryLiquidityUsd?: number;
   /** Paper cost model: itemised buy-side costs. */
   entryFeeBreakdown?: FeeBreakdown;
+  /** On-chain signature of the buy (live sends only; null in paper / dry-run). */
+  entrySignature?: string | null;
+  /** Mode the position was opened in. */
+  mode?: TradingMode;
+  /**
+   * Set when live startup reconciliation adopted wallet tokens the bot had
+   * bought (by signature) but no longer tracked, e.g. after a crash/restart.
+   */
+  adopted?: {
+    at: number;
+    /** Where the entry price came from. */
+    entrySource: "live_buy_fill" | "unconfirmed_buy_mark";
+    note: string;
+  };
 }
 
 export interface Fill {

@@ -180,6 +180,14 @@ export function createControlApp(engine: BotEngine) {
     res.status(200).json(result);
   });
 
+  /**
+   * Open positions (persisted to disk; survive restarts). `flat: true` means
+   * nothing is held — check this before stopping/restarting the API.
+   */
+  app.get("/positions", (_req, res) => {
+    res.json(engine.getOpenPositionsReport());
+  });
+
   app.get("/portfolio", async (_req, res) => {
     try {
       // portfolio.openPositions[] includes mint + symbol (Position) for chart URLs.
