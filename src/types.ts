@@ -129,6 +129,19 @@ export interface BotConfig {
    * Default 3. Exactly this many is allowed.
    */
   rugFilterMaxSameSlotBuys?: number;
+  /** Graduated (PumpSwap) coins: skip when the pool vault holds less than this % of supply. Default 10. */
+  rugFilterGradMinPoolPct?: number;
+  /** Graduated coins: skip when one non-pool wallet holds more than this % of supply. Default 10. */
+  rugFilterGradMaxHolderPct?: number;
+  /** Graduated coins: skip when the top 10 non-pool wallets hold more than this % together. Default 35. */
+  rugFilterGradMaxTop10Pct?: number;
+  /** A failed rug verdict sticks to the mint for this many minutes. Default 60. */
+  rugFilterFailCooldownMinutes?: number;
+  /**
+   * While holding, read the coin's bonding curve / PumpSwap pool on-chain this
+   * often (ms) and run TP / trailing / stop on it. 0 = off. Default 1000.
+   */
+  fastExitPollMs?: number;
   /**
    * Resolved trading mode. Absent / "paper" = today's behaviour.
    * Set by loadConfig from the live gates (see src/live/mode.ts).

@@ -46,9 +46,13 @@ import { ResearchChecklistStore } from "../checklist/checklist.js";
 import {
   rugFilterInputFromConfig,
   runRugFilter,
+  RugVerdictCache,
+  DEFAULT_RUG_FILTER_FAIL_COOLDOWN_MINUTES,
+  RUG_FILTER_REASONS,
   type RugFilterRpc,
 } from "../risk/rugFilter.js";
 import { ReadOnlySolanaRpc } from "../solana/rpc.js";
+import { OnchainPriceReader, type OnchainVenue } from "../market/onchainPrice.js";
 import {
   ReadOnlySolanaWs,
   emptySolanaWsStatus,
@@ -208,6 +212,14 @@ export interface OpenPositionsReport {
   positionRecovery: PositionRecoveryStatus | null;
 }
 
+/** FAST_EXIT_POLL_MS: 0 = off; otherwise clamped to ≥250ms. Default 1000. */
+export const DEFAULT_FAST_EXIT_POLL_MS = 1_000;
+export function fastExitPollMs(cfg: BotConfig): number {
+  const v = cfg.fastExitPollMs ?? DEFAULT_FAST_EXIT_POLL_MS;
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  return Math.max(250, Math.floor(v));
+}
+
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -279,6 +291,8 @@ export class BotEngine {
    * after paper skipped a coin live can't buy. In memory; restart clears.
    */
   readonly buyCooldowns = new BuyCooldowns();
+  /** Failed rug verdicts stick per mint (RUG_FILTER_FAIL_COOLDOWN_MINUTES). */
+  private rugVerdicts: RugVerdictCache | null = null;
   private liveSolBalance: number | null = null;
   private liveSolBalanceAt: number | null = null;
   private lastLiveError: string | null = null;
@@ -292,6 +306,14 @@ export class BotEngine {
   readonly hardLossStore: HardDailyLossStore;
   /** Last seen marks for open positions (unrealized loss for the hard limit). */
   private readonly lastMarks = new Map<string, number>();
+  /** On-chain mark reader for held coins (null = Dex/pump marks only). */
+  private readonly onchainPrice: OnchainPriceReader | null;
+  /** Last on-chain read per mint (reused by the slower full tick). */
+  private readonly onchainMarks = new Map<string, { usd: number; at: number; venue: OnchainVenue }>();
+  /** Position id → last failed fast sell (backs off to the full-tick cadence). */
+  private readonly fastSellFailAt = new Map<string, number>();
+  /** Mints whose mark source was already logged once. */
+  private readonly markSourceLogged = new Set<string>();
   private vaultSweeper: VaultSweeper | null = null;
   /** Invalid LIVE_VAULT_ADDRESS → refuse to start live. */
   private vaultError: string | null = null;
@@ -322,6 +344,12 @@ export class BotEngine {
        * null = force no WSS (tests).
        */
       solanaWs?: ReadOnlySolanaWs | null;
+      /**
+       * Real-time on-chain mark for held coins (curve / PumpSwap reserves).
+       * undefined = built from SOLANA_RPC_URL when FAST_EXIT_POLL_MS > 0.
+       * null = off (Dex/pump marks only).
+       */
+      onchainPrice?: OnchainPriceReader | null;
       /** Live broker for tests. Ignored in paper mode. */
       liveBroker?: LiveBroker | null;
       /** Hard daily loss store (tests inject a clock). */
@@ -356,6 +384,14 @@ export class BotEngine {
       deps?.chaseLockout ?? new ChaseLockoutStore(cfg.ledgerDir);
     this.runtimeConfigPath = deps?.runtimeConfigPath;
     this.solanaRpcOverride = deps?.solanaRpc;
+    if (deps?.onchainPrice !== undefined) {
+      this.onchainPrice = deps.onchainPrice;
+    } else if (fastExitPollMs(cfg) > 0) {
+      const rpc = ReadOnlySolanaRpc.fromEnv();
+      this.onchainPrice = rpc ? new OnchainPriceReader(rpc) : null;
+    } else {
+      this.onchainPrice = null;
+    }
     if (deps?.solanaWs !== undefined) {
       this.solanaWs = deps.solanaWs;
     } else if (this.cfg.solanaRpcWssConfigured === true) {
@@ -2031,6 +2067,118 @@ export class BotEngine {
     }
   }
 
+  /**
+   * Mark for exit checks: on-chain reserves first (real-time), else the
+   * Dex/pump price as before. Reuses an on-chain read younger than the fast
+   * poll interval so the full tick doesn't double the RPC load.
+   */
+  private async exitMark(pos: Position): Promise<number | null> {
+    const fast = await this.onchainMarkUsd(pos, fastExitPollMs(this.cfg));
+    if (fast != null) return fast;
+    return this.market.getPrice(pos.mint);
+  }
+
+  /** USD mark from the bonding curve / PumpSwap pool, or null (caller falls back). */
+  private async onchainMarkUsd(pos: Position, maxAgeMs: number): Promise<number | null> {
+    if (!this.onchainPrice) return null;
+    const prev = this.onchainMarks.get(pos.mint);
+    if (prev && maxAgeMs > 0 && Date.now() - prev.at < maxAgeMs) return prev.usd;
+    let m;
+    try {
+      m = await this.onchainPrice.read(pos.mint);
+    } catch {
+      m = null;
+    }
+    if (!m) {
+      if (!this.markSourceLogged.has(pos.mint)) {
+        this.markSourceLogged.add(pos.mint);
+        log.warn(`Exit price for ${pos.symbol}: on-chain read unavailable — using DexScreener/pump.fun price (can lag)`);
+      }
+      return null;
+    }
+    const solUsd = await this.resolveQuoteUsdRate();
+    if (solUsd == null || !(solUsd > 0)) return null;
+    const usd = m.priceSol * solUsd;
+    if (!Number.isFinite(usd) || !(usd > 0)) return null;
+    this.onchainMarks.set(pos.mint, { usd, at: Date.now(), venue: m.venue });
+    if (!this.markSourceLogged.has(pos.mint)) {
+      this.markSourceLogged.add(pos.mint);
+      log.info(
+        `Exit price for ${pos.symbol}: reading ${m.venue === "pumpswap" ? "PumpSwap pool" : "bonding curve"} on-chain every ${fastExitPollMs(this.cfg)}ms`,
+      );
+    }
+    return usd;
+  }
+
+  /**
+   * One fast exit pass: on-chain mark only (no Dex call), same evaluateExit as
+   * the full tick; a hit sells right away. Positions without an on-chain mark
+   * wait for the full tick (Dex fallback there).
+   */
+  async fastExitTick(): Promise<number> {
+    if (!this.onchainPrice) return 0;
+    let exits = 0;
+    for (const pos of [...this.ledger.openPositions]) {
+      const mark = await this.onchainMarkUsd(pos, 0);
+      if (mark == null) continue;
+      // A manual exit / full tick may have closed it while we read.
+      const cur = this.ledger.openPositions.find((p) => p.id === pos.id);
+      if (!cur) continue;
+      this.lastMarks.set(cur.mint, mark);
+      const { position: updated, exit } = evaluateExit(cur, mark, this.cfg, Date.now());
+      this.ledger.replacePosition(updated);
+      if (exit) {
+        // A failed live sell is retried by the full tick (same cadence as before),
+        // not hammered every fast tick.
+        const failedAt = this.fastSellFailAt.get(updated.id);
+        if (failedAt != null && Date.now() - failedAt < IN_POSITION_POLL_INTERVAL_MS) continue;
+        log.info(`Fast exit ${updated.symbol}: ${exit.reason} at on-chain mark ${mark}`);
+        const fill = await this.closePosition(updated, exit.markPrice, exit.reason);
+        if (fill) {
+          this.fastSellFailAt.delete(updated.id);
+          exits++;
+        } else if (this.ledger.openPositions.some((p) => p.id === updated.id)) {
+          this.fastSellFailAt.set(updated.id, Date.now());
+        }
+      }
+    }
+    // Forget read state for coins we no longer hold.
+    for (const id of [...this.fastSellFailAt.keys()]) {
+      if (!this.ledger.openPositions.some((p) => p.id === id)) this.fastSellFailAt.delete(id);
+    }
+    for (const mint of [...this.onchainMarks.keys()]) {
+      if (!this.ledger.openPositions.some((p) => p.mint === mint)) {
+        this.onchainMarks.delete(mint);
+        this.markSourceLogged.delete(mint);
+        this.onchainPrice.drop(mint);
+      }
+    }
+    return exits;
+  }
+
+  /** Sleep `totalMs`, running fastExitTick every FAST_EXIT_POLL_MS while holding. */
+  private async fastExitWatch(totalMs: number, signal: AbortSignal): Promise<void> {
+    const step = fastExitPollMs(this.cfg);
+    const end = Date.now() + totalMs;
+    while (true) {
+      const left = end - Date.now();
+      if (left <= 0) return;
+      if (!this.onchainPrice || step <= 0 || this.ledger.openPositions.length === 0) {
+        await sleep(left, signal);
+        return;
+      }
+      await sleep(Math.min(step, left), signal);
+      if (Date.now() >= end) return;
+      try {
+        const exits = await this.fastExitTick();
+        // Flat after a fast exit: hand back to the full tick (lockouts, next entry).
+        if (exits > 0 && this.ledger.openPositions.length === 0) return;
+      } catch (err) {
+        log.warn("Fast exit check failed; full tick will retry", err);
+      }
+    }
+  }
+
   private async runLoop(signal: AbortSignal): Promise<void> {
     const { cfg, market, ledger } = this;
     log.info("Runner loop starting", {
@@ -2101,7 +2249,9 @@ export class BotEngine {
           ledger.openPositions.length > 0
             ? Math.min(cfg.runner.pollIntervalMs, IN_POSITION_POLL_INTERVAL_MS)
             : cfg.runner.pollIntervalMs;
-        await sleep(sleepMs, signal);
+        // While holding: on-chain mark every FAST_EXIT_POLL_MS between full ticks,
+        // so TP / trailing / stop act on the real price within ~1-2s.
+        await this.fastExitWatch(sleepMs, signal);
       } catch (err) {
         if ((err as { name?: string }).name === "AbortError") break;
         throw err;
@@ -2168,7 +2318,7 @@ export class BotEngine {
     // Dex enrich) before stop / trail / TP / time_stop. With maxOpen=1 that scan
     // is wasted work on every in-position tick and added seconds of latency.
     for (const pos of [...ledger.openPositions]) {
-      let mark = await market.getPrice(pos.mint);
+      let mark = await this.exitMark(pos);
       if (mark == null) {
         // Price-based exits need a mark; time-stop must NOT — otherwise
         // maxOpenTrades=1 wedges forever when Dex/Pump drops the mint.
@@ -2336,6 +2486,18 @@ export class BotEngine {
     }
 
     if (cfg.rugFilterEnabled === true || this.isLiveMode()) {
+      if (!this.rugVerdicts) {
+        const mins =
+          cfg.rugFilterFailCooldownMinutes ?? DEFAULT_RUG_FILTER_FAIL_COOLDOWN_MINUTES;
+        this.rugVerdicts = new RugVerdictCache(Math.max(0, mins) * 60_000);
+      }
+      const cachedFail = this.rugVerdicts.get(entry.mint, Date.now());
+      if (cachedFail) {
+        log.info(
+          `Skip entry ${entry.symbol}: ${RUG_FILTER_REASONS.cachedFail} (failed ${cachedFail.reason} earlier; re-check after ${new Date(cachedFail.until).toISOString()})`,
+        );
+        return false;
+      }
       const rpc =
         this.solanaRpcOverride !== undefined
           ? this.solanaRpcOverride
@@ -2365,11 +2527,17 @@ export class BotEngine {
         );
       } catch (err) {
         log.warn(
-          `Skip entry ${entry.symbol}: rug_filter_rpc_error (filter threw; paper buy skipped)`,
+          `Skip entry ${entry.symbol}: rug_filter_rpc_error (filter threw; buy skipped)`,
           err,
+        );
+        this.rugVerdicts.record(
+          entry.mint,
+          { allow: false, reason: RUG_FILTER_REASONS.rpcError, detail: "filter threw", skipped: [] },
+          Date.now(),
         );
         return false;
       }
+      this.rugVerdicts.record(entry.mint, decision, Date.now());
       if (decision.skipped.length > 0) {
         log.info(
           `Rug filter skipped checks for ${entry.symbol}: ${decision.skipped.join(", ")}`,

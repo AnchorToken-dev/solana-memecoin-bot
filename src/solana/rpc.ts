@@ -1,8 +1,8 @@
 /**
  * Read-only Solana JSON-RPC.
  *
- * Allowed methods: getAccountInfo, getSignaturesForAddress, getTransaction,
- * getTokenLargestAccounts. Mint accounts are parsed from getAccountInfo.
+ * Allowed methods: getAccountInfo, getMultipleAccounts, getSignaturesForAddress,
+ * getTransaction, getTokenLargestAccounts. Mint accounts are parsed from getAccountInfo.
  *
  * No sendTransaction, no signing, no keypair loading. The endpoint URL is
  * never included in errors or logs.
@@ -70,6 +70,7 @@ export interface TransactionInfo {
 /** Methods this client is allowed to POST. Anything else is refused locally. */
 export const READ_ONLY_RPC_METHODS = [
   "getAccountInfo",
+  "getMultipleAccounts",
   "getSignaturesForAddress",
   "getTransaction",
   "getTokenLargestAccounts",
@@ -157,6 +158,43 @@ export class ReadOnlySolanaRpc {
       return { ok: false, error: "getAccountInfo: unexpected account payload" };
     }
     return { ok: true, value: parsed };
+  }
+
+  /**
+   * Up to 100 accounts in one request (same order as `pubkeys`; null = no
+   * account). One HTTP call instead of N — keeps rug checks and exit price
+   * polls inside provider rate limits.
+   */
+  async getMultipleAccounts(
+    pubkeys: string[],
+  ): Promise<RpcResult<(AccountInfo | null)[]>> {
+    if (pubkeys.length === 0) return { ok: true, value: [] };
+    if (pubkeys.length > 100) {
+      return { ok: false, error: "getMultipleAccounts: at most 100 accounts" };
+    }
+    const res = await this.rpc("getMultipleAccounts", [
+      pubkeys,
+      { encoding: "base64", commitment: "confirmed" },
+    ]);
+    if (!res.ok) return res;
+    const wrapped = res.value as { value?: unknown } | null;
+    const arr = wrapped && typeof wrapped === "object" ? wrapped.value : undefined;
+    if (!Array.isArray(arr) || arr.length !== pubkeys.length) {
+      return { ok: false, error: "getMultipleAccounts: unexpected payload" };
+    }
+    const out: (AccountInfo | null)[] = [];
+    for (const v of arr) {
+      if (v == null) {
+        out.push(null);
+        continue;
+      }
+      const parsed = parseAccountInfo(v);
+      if (!parsed) {
+        return { ok: false, error: "getMultipleAccounts: unexpected account payload" };
+      }
+      out.push(parsed);
+    }
+    return { ok: true, value: out };
   }
 
   /** Parsed SPL mint, or null when the account does not exist. */

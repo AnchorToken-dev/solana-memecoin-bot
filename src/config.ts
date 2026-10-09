@@ -10,6 +10,12 @@ import { clampHardDailyLoss } from "./risk/hardDailyLoss.js";
 import { resolveTradingMode, loadLiveSettings } from "./live/mode.js";
 import { LIVE_WALLET_KEYPAIR_PATH_ENV } from "./live/keypair.js";
 import { loadPaperFeeSettings } from "./broker/paperFees.js";
+import {
+  DEFAULT_RUG_FILTER_FAIL_COOLDOWN_MINUTES,
+  DEFAULT_RUG_FILTER_GRAD_MAX_HOLDER_PCT,
+  DEFAULT_RUG_FILTER_GRAD_MAX_TOP10_PCT,
+  DEFAULT_RUG_FILTER_GRAD_MIN_POOL_PCT,
+} from "./risk/rugFilter.js";
 
 loadDotenv();
 
@@ -77,6 +83,11 @@ const ConfigSchema = z.object({
   rugFilterEnabled: z.boolean(),
   rugFilterMaxTopHolderPct: z.number().gt(0).lte(100),
   rugFilterMaxSameSlotBuys: z.number().int().nonnegative(),
+  rugFilterGradMinPoolPct: z.number().gte(0).lte(100).optional(),
+  rugFilterGradMaxHolderPct: z.number().gt(0).lte(100).optional(),
+  rugFilterGradMaxTop10Pct: z.number().gt(0).lte(100).optional(),
+  rugFilterFailCooldownMinutes: z.number().gte(0).optional(),
+  fastExitPollMs: z.number().gte(0).optional(),
 });
 
 /** Paper-safe knobs allowed on PATCH /config. */
@@ -571,6 +582,23 @@ export function loadConfig(opts?: {
       "RUG_FILTER_MAX_SAME_SLOT_BUYS",
       file.rugFilterMaxSameSlotBuys ?? 3,
     ),
+    rugFilterGradMinPoolPct: envNum(
+      "RUG_FILTER_GRAD_MIN_POOL_PCT",
+      file.rugFilterGradMinPoolPct ?? DEFAULT_RUG_FILTER_GRAD_MIN_POOL_PCT,
+    ),
+    rugFilterGradMaxHolderPct: envNum(
+      "RUG_FILTER_GRAD_MAX_HOLDER_PCT",
+      file.rugFilterGradMaxHolderPct ?? DEFAULT_RUG_FILTER_GRAD_MAX_HOLDER_PCT,
+    ),
+    rugFilterGradMaxTop10Pct: envNum(
+      "RUG_FILTER_GRAD_MAX_TOP10_PCT",
+      file.rugFilterGradMaxTop10Pct ?? DEFAULT_RUG_FILTER_GRAD_MAX_TOP10_PCT,
+    ),
+    rugFilterFailCooldownMinutes: envNum(
+      "RUG_FILTER_FAIL_COOLDOWN_MINUTES",
+      file.rugFilterFailCooldownMinutes ?? DEFAULT_RUG_FILTER_FAIL_COOLDOWN_MINUTES,
+    ),
+    fastExitPollMs: envNum("FAST_EXIT_POLL_MS", file.fastExitPollMs ?? 1_000),
   };
 
   if (!opts?.skipRuntimeOverlay) {

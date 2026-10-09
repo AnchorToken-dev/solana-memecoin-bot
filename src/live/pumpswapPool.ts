@@ -31,6 +31,7 @@ const POOL_DISCRIMINATOR = [241, 154, 109, 4, 17, 177, 109, 188];
 // u64 lp_supply | coin_creator | bool mayhem | bool cashback | i128 virtual_quote_reserves | …
 const OFF_BASE_MINT = 43;
 const OFF_QUOTE_MINT = 75;
+const OFF_POOL_BASE_ACCOUNT = 139;
 const OFF_POOL_QUOTE_ACCOUNT = 171;
 const OFF_VIRTUAL_QUOTE = 245;
 
@@ -62,6 +63,8 @@ export function canonicalPumpSwapPool(mint: string): string {
 export interface PumpSwapPoolInfo {
   baseMint: string;
   quoteMint: string;
+  /** Pool's token (base) vault — the only holder the rug filter may exclude. */
+  poolBaseAccount: string;
   poolQuoteAccount: string;
   /** Lamports; 0 for legacy (non-boost) pools. */
   virtualQuoteLamports: bigint;
@@ -80,6 +83,7 @@ export function parsePumpSwapPool(data: Uint8Array): PumpSwapPoolInfo | null {
   return {
     baseMint: base58Encode(data.subarray(OFF_BASE_MINT, OFF_BASE_MINT + 32)),
     quoteMint: base58Encode(data.subarray(OFF_QUOTE_MINT, OFF_QUOTE_MINT + 32)),
+    poolBaseAccount: base58Encode(data.subarray(OFF_POOL_BASE_ACCOUNT, OFF_POOL_BASE_ACCOUNT + 32)),
     poolQuoteAccount: base58Encode(data.subarray(OFF_POOL_QUOTE_ACCOUNT, OFF_POOL_QUOTE_ACCOUNT + 32)),
     virtualQuoteLamports,
   };
