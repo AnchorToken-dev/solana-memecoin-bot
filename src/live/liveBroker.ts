@@ -472,6 +472,11 @@ export class LiveBroker {
     const s = this.d.settings;
     const ladder = sellSlippageLadder(s);
     const errors: string[] = [];
+    // Graduated coin → sell on PumpSwap. Also switch mid-ladder if the curve
+    // answers BondingCurveComplete (pump.fun 6005): the coin migrated after entry.
+    let sellPool: string =
+      s.pool !== "pump" && (s.pool === "pump-amm" || args.position.venue === "pumpswap") ? "pump-amm" : s.pool;
+    let switchedPool = false;
     for (let i = 0; i < ladder.length; i++) {
       // Priority fee escalates too, never past the hard cap.
       const prio = Math.min(s.priorityFeeSol * (1 + i), s.priorityFeeMaxSol);
@@ -483,10 +488,17 @@ export class LiveBroker {
         denominatedInSol: false,
         slippageBps: ladder[i]!,
         priorityFeeSol: prio,
-        pool: s.pool,
+        pool: sellPool,
       });
       if (!out.ok) {
-        errors.push(`attempt ${i + 1} @ ${ladder[i]}bps: ${out.reason}`);
+        errors.push(`attempt ${i + 1} @ ${ladder[i]}bps (pool ${sellPool}): ${out.reason}`);
+        if (!switchedPool && sellPool !== "pump-amm" && isBondingCurveComplete(out.reason)) {
+          // Retry this same rung on PumpSwap; nothing was sent, so no double-sell.
+          sellPool = "pump-amm";
+          switchedPool = true;
+          i--;
+          continue;
+        }
         if (this.mode !== "live_dry_run") continue;
         // Dry-run wallet never holds the token, so a sell simulation is EXPECTED
         // to fail. Close the simulated position at mark so exits keep working.
@@ -577,4 +589,11 @@ function entryFillPrice(p: Position): number {
   if (!(p.qty > 0)) return p.entryPrice;
   const fill = Math.max(0, p.entryNotionalUsd - bd.totalFeesUsd) / p.qty;
   return fill > 0 ? fill : p.entryPrice;
+}
+
+
+/** pump.fun bonding-curve program error 6005 = BondingCurveComplete (coin migrated to PumpSwap). */
+export function isBondingCurveComplete(reason: string | undefined): boolean {
+  if (!reason) return false;
+  return /BondingCurveComplete/i.test(reason) || /"Custom"\s*:\s*6005\b/.test(reason);
 }
