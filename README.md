@@ -141,6 +141,7 @@ npm run api
 | POST | `/runner/start` | **PAPER_MODE only**. Optional `?reset=1` or JSON `{ "reset": true }` clears the paper session first |
 | POST | `/runner/stop` | Stop loop |
 | POST | `/runner/reset` | **PAPER_MODE only**: stop if running, rebuild ledger to `BANKROLL_USD`, clear `stopReason` / cycles, empty trades. **Vault is kept.** Response includes `status` + `portfolio` |
+| GET | `/positions` | Open positions with exit levels; `"flat": true` = nothing held (check before restarting). Positions are saved to disk and restored on restart — see [docs/restart-safety.md](docs/restart-safety.md) |
 | GET | `/portfolio` | Bankroll / tradable cash / vault / equity / PnL / positions (`openPositions[].mint` + `.symbol`); also top-level `vaultUsd`, `tradableCashUsd`, `maxPositionUsd` |
 | POST | `/vault/skim` | **PAPER_MODE**: `{ "amountUsd" }` or `{ "percentOfProfit" }` — lock cash out of sizing |
 | POST | `/vault/return` | **PAPER_MODE**: `{ "amountUsd" }` — vault → tradable |

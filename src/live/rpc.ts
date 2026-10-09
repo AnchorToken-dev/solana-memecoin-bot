@@ -28,6 +28,19 @@ export interface TxMeta {
   postTokenBalances?: TokenBalance[];
 }
 
+/** SPL Token + Token-2022 program ids (wallet token balances for live reconciliation). */
+export const TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+export const TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+
+/** One wallet token account (UI amount = raw / 10^decimals). */
+export interface WalletTokenAccount {
+  mint: string;
+  /** Raw integer amount as a string (exact). */
+  amount: string;
+  decimals: number;
+  programId: string;
+}
+
 export interface LiveRpc {
   getBalanceLamports(pubkey: string): Promise<number>;
   simulate(txBase64: string): Promise<{ err: unknown; logs: string[] | null; unitsConsumed?: number }>;
@@ -39,6 +52,8 @@ export interface LiveRpc {
   getBlockHeight?(): Promise<number>;
   /** Optional (PumpSwap quote fix): raw account data, null if the account doesn't exist. Read-only. */
   getAccountData?(pubkey: string): Promise<Uint8Array | null>;
+  /** Optional (startup reconciliation): owner's SPL token accounts for one token program. Read-only. */
+  getTokenAccountsByOwner?(owner: string, programId: string): Promise<WalletTokenAccount[]>;
 }
 
 export class HttpsLiveRpc implements LiveRpc {
@@ -121,6 +136,24 @@ export class HttpsLiveRpc implements LiveRpc {
     ]);
     if (!r.value) return null;
     return new Uint8Array(Buffer.from(r.value.data[0], "base64"));
+  }
+
+  async getTokenAccountsByOwner(owner: string, programId: string): Promise<WalletTokenAccount[]> {
+    const r = await this.call<{
+      value: Array<{
+        account: {
+          data: { parsed?: { info?: { mint?: string; tokenAmount?: { amount?: string; decimals?: number } } } };
+        };
+      }>;
+    }>("getTokenAccountsByOwner", [owner, { programId }, { encoding: "jsonParsed", commitment: "confirmed" }]);
+    const out: WalletTokenAccount[] = [];
+    for (const v of r.value ?? []) {
+      const info = v.account?.data?.parsed?.info;
+      const amt = info?.tokenAmount;
+      if (!info?.mint || typeof amt?.amount !== "string" || typeof amt.decimals !== "number") continue;
+      out.push({ mint: info.mint, amount: amt.amount, decimals: amt.decimals, programId });
+    }
+    return out;
   }
 
   async getTransactionMeta(sig: string) {

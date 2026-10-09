@@ -20,7 +20,14 @@ export type SessionEventType =
   | "vault_sweep"
   | "vault_sweep_failed"
   | "buying_paused"
-  | "buying_resumed";
+  | "buying_resumed"
+  | "positions_restored"
+  | "positions_restore_failed"
+  | "position_adopted"
+  | "position_missing"
+  | "position_adjusted"
+  | "orphan_not_adopted"
+  | "reconcile_failed";
 
 export interface SessionEvent {
   id: string;

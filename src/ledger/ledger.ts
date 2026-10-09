@@ -6,13 +6,33 @@ import {
   readFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { renameSync } from "node:fs";
 import type {
   Fill,
   PortfolioSnapshot,
   Position,
   TradeRecord,
+  TradingMode,
 } from "../types.js";
 import { log } from "../logging.js";
+import {
+  POSITIONS_FILE_VERSION,
+  readPositionsFile,
+  writeFileAtomic,
+  type PositionLevels,
+  type PositionsFile,
+} from "./positionStore.js";
+
+export interface PositionPersistence {
+  path: string;
+  mode: TradingMode;
+  /** Optional exit levels written next to each position (informational). */
+  levels?: (p: Position) => PositionLevels;
+}
+
+export type RestoreResult =
+  | { ok: true; restored: Position[]; savedAt: number | null }
+  | { ok: false; error: string; movedTo: string | null };
 
 /**
  * Paper ledger + skim vault.
@@ -32,6 +52,8 @@ export class PaperLedger {
   private readonly jsonPath: string;
   private readonly csvPath: string;
   private readonly vaultPath: string;
+  private persistence: PositionPersistence | null = null;
+  private lastPositionsJson = "";
 
   constructor(bankrollUsd: number, ledgerDir: string) {
     this.cashUsd = bankrollUsd;
@@ -47,6 +69,136 @@ export class PaperLedger {
       );
     }
     this.loadVault();
+  }
+
+  /** Directory holding trades.json / vault.json (mode-scoped by the engine). */
+  get directory(): string {
+    return this.dir;
+  }
+
+  /** Write open positions + session cash to `opts.path` on every change from now on. */
+  enablePositionPersistence(opts: PositionPersistence): void {
+    this.persistence = opts;
+  }
+
+  get positionsFilePath(): string | null {
+    return this.persistence?.path ?? null;
+  }
+
+  /**
+   * Load open positions saved by a previous process. When the file has open
+   * positions, session cash + realized PnL come from it too — that cash
+   * already has those positions' cost deducted, so nothing is double counted.
+   * A flat (or missing) file leaves the fresh session untouched.
+   * A corrupt file is moved aside (never silently overwritten).
+   */
+  restorePositions(): RestoreResult {
+    const pp = this.persistence;
+    if (!pp) return { ok: true, restored: [], savedAt: null };
+    const r = readPositionsFile(pp.path, pp.mode);
+    if (!r.ok) {
+      let movedTo: string | null = `${pp.path}.corrupt-${Date.now()}`;
+      try {
+        renameSync(pp.path, movedTo);
+      } catch {
+        movedTo = null;
+      }
+      return { ok: false, error: r.error, movedTo };
+    }
+    if (!r.file || r.file.positions.length === 0) return { ok: true, restored: [], savedAt: r.file?.savedAt ?? null };
+    const known = new Set(this.positions.map((p) => p.id));
+    const restored = r.file.positions.filter((p) => !known.has(p.id));
+    this.positions.push(...restored);
+    if (Number.isFinite(r.file.cashUsd)) this.cashUsd = r.file.cashUsd;
+    if (Number.isFinite(r.file.realizedPnlUsd)) this.realizedPnlUsd = r.file.realizedPnlUsd;
+    this.savePositions(true);
+    return { ok: true, restored, savedAt: r.file.savedAt };
+  }
+
+  /** Force-write the positions file (graceful shutdown). */
+  flushPositions(): void {
+    this.savePositions(true);
+  }
+
+  private savePositions(force = false): void {
+    const pp = this.persistence;
+    if (!pp) return;
+    const positions = this.positions.map((p) => (pp.levels ? { ...p, levels: pp.levels(p) } : { ...p }));
+    const body = JSON.stringify({ positions, cashUsd: this.cashUsd, realizedPnlUsd: this.realizedPnlUsd });
+    if (!force && body === this.lastPositionsJson) return;
+    const file: PositionsFile = {
+      version: POSITIONS_FILE_VERSION,
+      mode: pp.mode,
+      savedAt: Date.now(),
+      cashUsd: this.cashUsd,
+      realizedPnlUsd: this.realizedPnlUsd,
+      positions,
+    };
+    try {
+      writeFileAtomic(pp.path, `${JSON.stringify(file, null, 2)}\n`);
+      this.lastPositionsJson = body;
+    } catch (err) {
+      log.error(`Could not save open positions to ${pp.path} — a restart now could lose track of them`, err);
+    }
+  }
+
+  /**
+   * Live reconciliation: track wallet tokens the bot bought but lost track of.
+   * Their cost was spent in an earlier session → deduct it so cash isn't double counted.
+   */
+  adoptPosition(position: Position): void {
+    this.positions.push(position);
+    this.cashUsd -= position.entryNotionalUsd;
+    this.savePositions(true);
+    log.warn(
+      `ADOPT ${position.symbol} qty=${position.qty} @ ${position.entryPrice.toPrecision(6)} (${position.adopted?.entrySource ?? "?"}) cash=$${this.cashUsd.toFixed(2)}`,
+    );
+  }
+
+  /**
+   * Live reconciliation: a restored position's tokens are gone from the wallet
+   * (e.g. sold by hand). Remove it WITHOUT a sell and WITHOUT booking P&L
+   * (proceeds unknown). Recorded in trades.json as a zero sell so the mint
+   * is never re-adopted from the old buy.
+   */
+  dropPosition(position: Position, reason: "reconciled_missing"): boolean {
+    const before = this.positions.length;
+    this.positions = this.positions.filter((p) => p.id !== position.id);
+    if (this.positions.length === before) return false;
+    const fill: Fill = {
+      id: `reconcile-${position.id}`,
+      positionId: position.id,
+      mint: position.mint,
+      symbol: position.symbol,
+      side: "sell",
+      qty: 0,
+      price: 0,
+      notionalUsd: 0,
+      feesUsd: 0,
+      slippageUsd: 0,
+      reason,
+      timestamp: Date.now(),
+      paper: position.mode == null || position.mode === "paper",
+      ...(position.mode ? { mode: position.mode } : {}),
+      signature: null,
+    };
+    const rec: TradeRecord = { fill, realizedPnlUsd: 0, cashAfter: this.cashUsd };
+    this.trades.push(rec);
+    this.persist(rec);
+    this.savePositions(true);
+    log.warn(`DROP ${position.symbol} (${position.mint}): ${reason} — not in wallet; no sell attempted, P&L not booked`);
+    return true;
+  }
+
+  /** Every fill ever written to trades.json in this ledger dir (oldest first). */
+  readAllFills(): Fill[] {
+    if (!existsSync(this.jsonPath)) return [];
+    try {
+      const all = JSON.parse(readFileSync(this.jsonPath, "utf8")) as TradeRecord[];
+      return Array.isArray(all) ? all.map((r) => r?.fill).filter((f): f is Fill => !!f && typeof f.mint === "string") : [];
+    } catch {
+      return [];
+    }
   }
 
   get openPositions(): Position[] {
@@ -80,7 +232,11 @@ export class PaperLedger {
 
   replacePosition(updated: Position): void {
     const i = this.positions.findIndex((p) => p.id === updated.id);
-    if (i >= 0) this.positions[i] = updated;
+    if (i >= 0) {
+      this.positions[i] = updated;
+      // Only rewrites when something changed (high-water / trail arm), not every tick.
+      this.savePositions();
+    }
   }
 
   recordBuy(fill: Fill, position: Position): void {
@@ -89,6 +245,7 @@ export class PaperLedger {
     const rec: TradeRecord = { fill, cashAfter: this.cashUsd };
     this.trades.push(rec);
     this.persist(rec);
+    this.savePositions(true);
     log.info(
       `BUY  ${fill.symbol} qty=${fill.qty.toFixed(4)} @ ${fill.price.toPrecision(6)} (fees $${fill.feesUsd.toFixed(4)}) cash=$${this.cashUsd.toFixed(2)} vault=$${this.vaultUsd.toFixed(2)}`,
     );
@@ -109,6 +266,7 @@ export class PaperLedger {
     };
     this.trades.push(rec);
     this.persist(rec);
+    this.savePositions(true);
     log.info(
       `SELL ${fill.symbol} @ ${fill.price.toPrecision(6)} reason=${fill.reason} pnl=$${realizedPnlUsd.toFixed(4)} cash=$${this.cashUsd.toFixed(2)} vault=$${this.vaultUsd.toFixed(2)}`,
     );
@@ -147,6 +305,7 @@ export class PaperLedger {
     this.cashUsd -= skimmed;
     this.vaultUsd += skimmed;
     this.persistVault();
+    this.savePositions();
     log.info(
       `VAULT skim $${skimmed.toFixed(2)} → vault=$${this.vaultUsd.toFixed(2)} tradable=$${this.cashUsd.toFixed(2)}`,
     );
@@ -191,6 +350,7 @@ export class PaperLedger {
     this.vaultUsd -= returned;
     this.cashUsd += returned;
     this.persistVault();
+    this.savePositions();
     log.info(
       `VAULT return $${returned.toFixed(2)} → vault=$${this.vaultUsd.toFixed(2)} tradable=$${this.cashUsd.toFixed(2)}`,
     );
@@ -239,6 +399,7 @@ export class PaperLedger {
     this.positions = [];
     this.realizedPnlUsd = 0;
     this.trades = [];
+    this.savePositions(true);
     writeFileSync(this.jsonPath, "[]\n");
     writeFileSync(
       this.csvPath,

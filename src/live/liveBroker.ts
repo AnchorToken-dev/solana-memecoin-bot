@@ -19,6 +19,7 @@ import { instructionProgramIds, signTransaction, txSignature } from "./tx.js";
 import { classifyBuildFailure, decodeProgramError, type BuyFailureKind, type DecodedProgramError } from "./pumpErrors.js";
 import { compensateBuy, isSolQuoteMint, MAX_PUMPSWAP_QUOTE_GAP, readPumpSwapQuoteGap } from "./pumpswapPool.js";
 import { computeOnChainDelta, LAMPORTS_PER_SOL } from "./fills.js";
+import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "./rpc.js";
 import { redactSecrets } from "./redact.js";
 import { sellSlippageLadder, type LiveSettings } from "./mode.js";
 import { checkLiveWalletFunds, type EntryFundsCheck } from "../risk/entryFunds.js";
@@ -129,6 +130,28 @@ export class LiveBroker {
 
   get publicKey(): string {
     return this.d.signer.publicKey;
+  }
+
+  /**
+   * Wallet SPL balances (Token + Token-2022), summed per mint, UI units.
+   * Read-only via the configured HTTPS RPC. Throws when the RPC can't do it.
+   */
+  async getWalletTokenBalances(): Promise<Map<string, { qty: number; programIds: string[] }>> {
+    const rpc = this.d.rpc;
+    if (typeof rpc.getTokenAccountsByOwner !== "function") throw new Error("RPC client cannot list token accounts");
+    const out = new Map<string, { qty: number; programIds: string[] }>();
+    for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+      const accts = await rpc.getTokenAccountsByOwner(this.d.signer.publicKey, programId);
+      for (const a of accts) {
+        const qty = Number(a.amount) / 10 ** a.decimals;
+        if (!Number.isFinite(qty)) continue;
+        const cur = out.get(a.mint) ?? { qty: 0, programIds: [] };
+        cur.qty += qty;
+        if (!cur.programIds.includes(programId)) cur.programIds.push(programId);
+        out.set(a.mint, cur);
+      }
+    }
+    return out;
   }
 
   async getSolBalance(): Promise<number> {

@@ -14,6 +14,41 @@ import { BotEngine } from "./engine/botEngine.js";
 import { startControlApi } from "./api/server.js";
 import { log } from "./logging.js";
 
+/**
+ * Ctrl+C / kill / closed terminal: write the open-positions file FIRST (sync),
+ * then stop the runner, write again, exit. A second signal exits at once (file
+ * already written). Open positions are restored on the next start.
+ */
+function installGracefulShutdown(engine: BotEngine, what: string): void {
+  let shuttingDown = false;
+  const flush = () => {
+    try {
+      engine.flushOpenPositions();
+    } catch (err) {
+      log.error("Could not write open positions on shutdown", err);
+    }
+  };
+  const shutdown = async (sig: string) => {
+    flush();
+    if (shuttingDown) process.exit(0);
+    shuttingDown = true;
+    const n = engine.getOpenPositionsReport().count;
+    log.info(`${sig}: shutting down ${what}… ${n > 0 ? `${n} open position(s) saved; they resume on next start` : "flat"}`);
+    await Promise.race([engine.dispose(), new Promise((r) => setTimeout(r, 5_000))]).catch(() => undefined);
+    flush();
+    process.exit(0);
+  };
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"] as const) {
+    try {
+      process.on(sig, () => void shutdown(sig));
+    } catch {
+      /* signal not supported on this OS */
+    }
+  }
+  // Last chance on any other exit path (sync write only).
+  process.on("exit", flush);
+}
+
 function modeFromArgs(): "cli" | "api" {
   const arg = process.argv.slice(2).find((a) => !a.startsWith("-"));
   if (arg === "api" || process.env.CONTROL_API === "1" || process.env.CONTROL_API === "true") {
@@ -49,6 +84,7 @@ async function main(): Promise<void> {
   Start:     POST http://127.0.0.1:${port}/runner/start  (?reset=1 clears ledger first)
   Stop:      POST http://127.0.0.1:${port}/runner/stop
   Reset:     POST http://127.0.0.1:${port}/runner/reset  (PAPER: clear ledger / daily-loss lock)
+  Positions: http://127.0.0.1:${port}/positions  (open positions; "flat": true = safe to restart)
   Portfolio: http://127.0.0.1:${port}/portfolio
   Trades:    http://127.0.0.1:${port}/trades
   Journal:   http://127.0.0.1:${port}/journal  (P&L summary + charts + USD/SOL; survives reset; PATCH note)
@@ -65,26 +101,14 @@ Phone: set API base URL in the app Settings.
 Listening on ${host}:${port}. Runner starts STOPPED — use the app or POST /runner/start.
 `);
 
-    const shutdown = async () => {
-      log.info("Shutting down API…");
-      await engine.dispose();
-      process.exit(0);
-    };
-    process.on("SIGINT", () => void shutdown());
-    process.on("SIGTERM", () => void shutdown());
+    installGracefulShutdown(engine, "API");
     // Keep process alive
     await new Promise(() => undefined);
     return;
   }
 
   // CLI: auto-start paper loop
-  const shutdown = async () => {
-    log.info("Shutting down…");
-    await engine.dispose();
-    process.exit(0);
-  };
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
+  installGracefulShutdown(engine, "CLI");
 
   const started = await engine.start();
   if (!started.ok) {
