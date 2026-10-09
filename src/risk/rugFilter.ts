@@ -1,7 +1,7 @@
 /**
- * Pre-buy rug / manipulation filter. Paper only.
+ * Pre-buy rug / manipulation filter. Optional in paper, mandatory in live.
  *
- * Default OFF. When OFF, this module is not called and no RPC is used.
+ * Default OFF in paper. When OFF, this module is not called and no RPC is used.
  * When ON without a read-only RPC, the buy is skipped (fail closed).
  * Never sends a transaction and never invents a price.
  *
@@ -19,12 +19,35 @@ import {
   type RpcResult,
   type SignatureInfo,
 } from "../solana/rpc.js";
+import {
+  PUMPSWAP_PROGRAM_ID,
+  WSOL_MINT,
+  canonicalPumpSwapPool,
+  parsePumpSwapPool,
+  parseTokenAccountAmount,
+} from "../live/pumpswapPool.js";
 
 /** Pump.fun bonding-curve program. Token accounts it owns are the curve, not a wallet. */
 export const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 
 export const DEFAULT_RUG_FILTER_MAX_TOP_HOLDER_PCT = 30;
 export const DEFAULT_RUG_FILTER_MAX_SAME_SLOT_BUYS = 3;
+/**
+ * Graduated (PumpSwap) coins. Incidents 2026-10-09: TRUMPSI's pool held 5.4%
+ * and BUNKER's 4.2% of supply at our buy; one wallet held 13.5% and ~600
+ * bundled wallets another ~27% — all dumped within 31s-4min. The old 30%
+ * single-holder check passed them.
+ * Pool share falls as price rises after graduation (~20% at migration), so the
+ * floor is a tradeoff: 10% blocked both incidents with 2x margin; on 52 live
+ * graduated pump coins (Oct 9) 11 passed at 10%, 7 at 15%, 49 with no floor.
+ */
+export const DEFAULT_RUG_FILTER_GRAD_MIN_POOL_PCT = 10;
+export const DEFAULT_RUG_FILTER_GRAD_MAX_HOLDER_PCT = 10;
+export const DEFAULT_RUG_FILTER_GRAD_MAX_TOP10_PCT = 35;
+/** A failed verdict sticks to the mint this long so a retry can't flip it to pass. */
+export const DEFAULT_RUG_FILTER_FAIL_COOLDOWN_MINUTES = 60;
+/** Solana incinerator: tokens sent here are burned for good. */
+export const INCINERATOR_ADDRESS = "1nc1nerator11111111111111111111111111111111";
 /** getSignaturesForAddress page size. A full page means we may not see creation. */
 export const SAME_SLOT_SIGNATURE_LIMIT = 1000;
 
@@ -39,6 +62,14 @@ export const RUG_FILTER_REASONS = {
   holdersUnavailable: "top_holder_unavailable",
   sameSlot: "same_slot_snipe",
   sameSlotUnavailable: "same_slot_unavailable",
+  /** Graduated coin but its PumpSwap pool/vault could not be read. Fail closed. */
+  gradPoolUnavailable: "graduated_pool_unavailable",
+  /** Pool token vault holds too little of the supply (price far above graduation / overhang). */
+  gradPoolThin: "graduated_pool_share_low",
+  gradHolder: "graduated_holder_concentration",
+  gradTop10: "graduated_top10_concentration",
+  /** Earlier fail for this mint is still within the cooldown. */
+  cachedFail: "rug_filter_cached_fail",
 } as const;
 
 export const RUG_FILTER_SKIPPED = {
@@ -53,6 +84,10 @@ export interface RugFilterRpc {
     mint: string,
   ): Promise<RpcResult<LargestTokenAccount[]>>;
   getAccountInfo(pubkey: string): Promise<RpcResult<AccountInfo | null>>;
+  /** Optional batch read (one request). Falls back to getAccountInfo per key. */
+  getMultipleAccounts?(
+    pubkeys: string[],
+  ): Promise<RpcResult<(AccountInfo | null)[]>>;
   getSignaturesForAddress(
     address: string,
     opts?: { limit?: number },
@@ -67,6 +102,16 @@ export interface RugFilterDecision {
   detail: string;
   /** Checks we did not run. Never treated as a pass. */
   skipped: string[];
+  /** Holder numbers for the log (graduated coins). */
+  metrics?: GraduatedHolderMetrics;
+}
+
+export interface GraduatedHolderMetrics {
+  pool: string;
+  poolVault: string;
+  poolPct: number;
+  topHolderPct: number;
+  top10Pct: number;
 }
 
 export interface RugFilterInput {
@@ -78,6 +123,14 @@ export interface RugFilterInput {
   maxSameSlotBuys: number;
   /** Bonding-curve token account and curve PDA, when the pump payload has them. */
   ignoreAddresses?: string[];
+  /** From the scan: "pumpswap" = graduated. Unknown is resolved on-chain. */
+  venue?: "bonding_curve" | "pumpswap";
+  /** Graduated coins: skip if the pool vault holds less than this % of supply. */
+  gradMinPoolPct?: number;
+  /** Graduated coins: skip if any one non-pool holder is above this % of supply. */
+  gradMaxHolderPct?: number;
+  /** Graduated coins: skip if the top 10 non-pool holders together are above this %. */
+  gradMaxTop10Pct?: number;
   /** Present only for the skip log. Not used to query prior coins. */
   creator?: string | null;
 }
@@ -163,18 +216,37 @@ export async function runRugFilter(
     );
   }
 
-  const holders = await checkTopHolder(input, mint.supply);
-  if (!holders.ok) return reject(holders.reason, holders.detail, skipped);
+  // Graduated? Decided from the chain (canonical PumpSwap pool), not only the scan.
+  const grad = await readGraduation(input);
+  if (!grad.ok) return reject(grad.reason, grad.detail, skipped);
+
+  let metrics: GraduatedHolderMetrics | undefined;
+  if (grad.pool) {
+    const g = await checkGraduatedHolders(input, mint.supply, grad.pool);
+    if (!g.ok) {
+      const out = reject(g.reason, g.detail, skipped);
+      if (g.metrics) out.metrics = g.metrics;
+      return out;
+    }
+    metrics = g.metrics;
+  } else {
+    const holders = await checkTopHolder(input, mint.supply);
+    if (!holders.ok) return reject(holders.reason, holders.detail, skipped);
+  }
 
   const slot = await checkSameSlot(input);
   if (!slot.ok) return reject(slot.reason, slot.detail, skipped);
+  // Same-slot history only; holder concentration never passes on a truncated read.
   if (slot.truncated) skipped.push(RUG_FILTER_SKIPPED.sameSlotTruncated);
 
   return {
     allow: true,
     reason: null,
-    detail: "rug filter passed",
+    detail: metrics
+      ? `rug filter passed (graduated: pool ${metrics.poolPct.toFixed(1)}%, top holder ${metrics.topHolderPct.toFixed(1)}%, top10 ${metrics.top10Pct.toFixed(1)}%)`
+      : "rug filter passed",
     skipped,
+    ...(metrics ? { metrics } : {}),
   };
 }
 
@@ -197,6 +269,13 @@ export function rugFilterInputFromConfig(
       cfg.rugFilterMaxSameSlotBuys ?? DEFAULT_RUG_FILTER_MAX_SAME_SLOT_BUYS,
     ignoreAddresses: ignore,
     creator: snap.creator ?? null,
+    ...(snap.venue ? { venue: snap.venue } : {}),
+    gradMinPoolPct:
+      cfg.rugFilterGradMinPoolPct ?? DEFAULT_RUG_FILTER_GRAD_MIN_POOL_PCT,
+    gradMaxHolderPct:
+      cfg.rugFilterGradMaxHolderPct ?? DEFAULT_RUG_FILTER_GRAD_MAX_HOLDER_PCT,
+    gradMaxTop10Pct:
+      cfg.rugFilterGradMaxTop10Pct ?? DEFAULT_RUG_FILTER_GRAD_MAX_TOP10_PCT,
   };
 }
 
@@ -265,9 +344,260 @@ async function isPumpCurveHolding(
   if (!holder) return "error";
   if (ignore.has(holder)) return "curve";
   const ownerAcc = await rpc.getAccountInfo(holder);
-  if (!ownerAcc.ok || !ownerAcc.value) return "error";
+  if (!ownerAcc.ok) return "error";
+  // A wallet with 0 SOL has no account at all — it is still a wallet, not an error.
+  if (!ownerAcc.value) return "wallet";
   if (ownerAcc.value.owner === PUMP_FUN_PROGRAM_ID) return "curve";
   return "wallet";
+}
+
+// ---------------------------------------------------------------- graduated
+
+type GradPool = { pool: string; vault: string };
+type Graduation =
+  | { ok: true; pool: GradPool | null }
+  | { ok: false; reason: string; detail: string };
+
+/**
+ * Canonical PumpSwap pool for the mint (SOL quote). `pool: null` = still on
+ * the bonding curve. Fails closed when the scan says graduated but the pool
+ * is missing / unreadable, or when the read itself errors.
+ */
+async function readGraduation(input: RugFilterInput): Promise<Graduation> {
+  let pool: string;
+  try {
+    pool = canonicalPumpSwapPool(input.mint);
+  } catch {
+    if (input.venue === "pumpswap") {
+      return {
+        ok: false,
+        reason: RUG_FILTER_REASONS.gradPoolUnavailable,
+        detail: "graduated coin but mint is not a valid key for the PumpSwap pool",
+      };
+    }
+    return { ok: true, pool: null };
+  }
+  const res = await input.rpc!.getAccountInfo(pool);
+  if (!res.ok) {
+    return {
+      ok: false,
+      reason: RUG_FILTER_REASONS.rpcError,
+      detail: `PumpSwap pool read failed: ${res.error}`,
+    };
+  }
+  if (!res.value) {
+    if (input.venue === "pumpswap") {
+      return {
+        ok: false,
+        reason: RUG_FILTER_REASONS.gradPoolUnavailable,
+        detail: "graduated coin but its canonical PumpSwap SOL pool was not found",
+      };
+    }
+    return { ok: true, pool: null };
+  }
+  const info =
+    res.value.owner === PUMPSWAP_PROGRAM_ID ? parsePumpSwapPool(res.value.data) : null;
+  if (!info || info.baseMint !== input.mint || info.quoteMint !== WSOL_MINT) {
+    return {
+      ok: false,
+      reason: RUG_FILTER_REASONS.gradPoolUnavailable,
+      detail: "PumpSwap pool account did not parse as this coin's SOL pool",
+    };
+  }
+  return { ok: true, pool: { pool, vault: info.poolBaseAccount } };
+}
+
+async function readAccounts(
+  rpc: RugFilterRpc,
+  keys: string[],
+): Promise<RpcResult<(AccountInfo | null)[]>> {
+  if (rpc.getMultipleAccounts) return rpc.getMultipleAccounts(keys);
+  const out: (AccountInfo | null)[] = [];
+  for (const k of keys) {
+    const r = await rpc.getAccountInfo(k);
+    if (!r.ok) return r;
+    out.push(r.value);
+  }
+  return { ok: true, value: out };
+}
+
+function pctOf(amount: bigint, supply: bigint): number {
+  if (supply <= 0n) return 100;
+  return Number((amount * 1_000_000n) / supply) / 10_000;
+}
+
+type GradCheck =
+  | { ok: true; metrics: GraduatedHolderMetrics }
+  | { ok: false; reason: string; detail: string; metrics?: GraduatedHolderMetrics };
+
+/**
+ * Holder concentration for a graduated coin. Only the canonical pool's token
+ * vault, the incinerator and pump.fun-curve-owned accounts are excluded —
+ * every other holder (including other pools) counts. Any read gap fails closed.
+ */
+async function checkGraduatedHolders(
+  input: RugFilterInput,
+  supply: bigint,
+  grad: GradPool,
+): Promise<GradCheck> {
+  const rpc = input.rpc!;
+  const unavailable = (detail: string): GradCheck => ({
+    ok: false,
+    reason: RUG_FILTER_REASONS.gradPoolUnavailable,
+    detail,
+  });
+
+  const largest = await rpc.getTokenLargestAccounts(input.mint);
+  if (!largest.ok) {
+    return {
+      ok: false,
+      reason: RUG_FILTER_REASONS.rpcError,
+      detail: `largest accounts failed: ${largest.error}`,
+    };
+  }
+  if (largest.value.length === 0) {
+    return {
+      ok: false,
+      reason: RUG_FILTER_REASONS.holdersUnavailable,
+      detail: "getTokenLargestAccounts returned no accounts",
+    };
+  }
+
+  // Pool vault balance straight from its token account (it may not be top-20).
+  const rows = largest.value.filter((r) => r.address !== grad.vault);
+  const tokenAccs = await readAccounts(rpc, [grad.vault, ...rows.map((r) => r.address)]);
+  if (!tokenAccs.ok) {
+    return {
+      ok: false,
+      reason: RUG_FILTER_REASONS.rpcError,
+      detail: `holder accounts read failed: ${tokenAccs.error}`,
+    };
+  }
+  const vaultAcc = tokenAccs.value[0];
+  const vaultAmount = vaultAcc ? parseTokenAccountAmount(vaultAcc.data) : null;
+  const vaultHolder = vaultAcc ? parseTokenAccountHolder(vaultAcc.data) : null;
+  if (vaultAmount == null || vaultHolder !== grad.pool) {
+    return unavailable("PumpSwap pool token vault unreadable");
+  }
+
+  const holders: string[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const acc = tokenAccs.value[i + 1];
+    const h = acc ? parseTokenAccountHolder(acc.data) : null;
+    if (!h) return unavailable(`could not read holder of ${rows[i]!.address}`);
+    holders.push(h);
+  }
+  const uniqueHolders = [...new Set(holders)];
+  const holderAccs = await readAccounts(rpc, uniqueHolders);
+  if (!holderAccs.ok) {
+    return {
+      ok: false,
+      reason: RUG_FILTER_REASONS.rpcError,
+      detail: `holder owner read failed: ${holderAccs.error}`,
+    };
+  }
+  const programOf = new Map<string, string | null>();
+  uniqueHolders.forEach((h, i) => programOf.set(h, holderAccs.value[i]?.owner ?? null));
+
+  // Sum per holder wallet (one wallet can own several token accounts).
+  const perHolder = new Map<string, bigint>();
+  for (let i = 0; i < rows.length; i++) {
+    const h = holders[i]!;
+    if (h === INCINERATOR_ADDRESS) continue;
+    if (programOf.get(h) === PUMP_FUN_PROGRAM_ID) continue; // leftover curve
+    perHolder.set(h, (perHolder.get(h) ?? 0n) + rows[i]!.amount);
+  }
+  const sorted = [...perHolder.values()].sort((a, b) => (a > b ? -1 : a < b ? 1 : 0));
+  const top = sorted[0] ?? 0n;
+  const top10 = sorted.slice(0, 10).reduce((a, b) => a + b, 0n);
+
+  const metrics: GraduatedHolderMetrics = {
+    pool: grad.pool,
+    poolVault: grad.vault,
+    poolPct: pctOf(vaultAmount, supply),
+    topHolderPct: pctOf(top, supply),
+    top10Pct: pctOf(top10, supply),
+  };
+  const nums = `pool ${metrics.poolPct.toFixed(1)}%, top holder ${metrics.topHolderPct.toFixed(1)}%, top10 ${metrics.top10Pct.toFixed(1)}%`;
+
+  const maxHolder = Math.min(
+    input.gradMaxHolderPct ?? DEFAULT_RUG_FILTER_GRAD_MAX_HOLDER_PCT,
+    input.maxTopHolderPct,
+  );
+  if (holderExceedsPct(top, supply, maxHolder)) {
+    return {
+      ok: false,
+      reason: RUG_FILTER_REASONS.gradHolder,
+      detail: `one wallet holds more than ${maxHolder}% of supply outside the pool (${nums})`,
+      metrics,
+    };
+  }
+  const maxTop10 = input.gradMaxTop10Pct ?? DEFAULT_RUG_FILTER_GRAD_MAX_TOP10_PCT;
+  if (holderExceedsPct(top10, supply, maxTop10)) {
+    return {
+      ok: false,
+      reason: RUG_FILTER_REASONS.gradTop10,
+      detail: `top 10 wallets outside the pool hold more than ${maxTop10}% of supply (${nums})`,
+      metrics,
+    };
+  }
+  const minPool = input.gradMinPoolPct ?? DEFAULT_RUG_FILTER_GRAD_MIN_POOL_PCT;
+  if (minPool > 0 && vaultAmount * 10000n < supply * BigInt(Math.round(minPool * 100))) {
+    return {
+      ok: false,
+      reason: RUG_FILTER_REASONS.gradPoolThin,
+      detail: `pool holds less than ${minPool}% of supply — wallets outside could dump it (${nums})`,
+      metrics,
+    };
+  }
+  return { ok: true, metrics };
+}
+
+// ------------------------------------------------------------ fail cache
+
+/**
+ * Per-mint memory of failed verdicts. A fail sticks for the cooldown so a
+ * later re-check (RPC flake, holders shuffled between wallets) can't turn it
+ * into a pass. RPC errors are remembered briefly too (no hammering), but a
+ * real verdict (concentration, freeze, …) is never shortened by them.
+ */
+export const RUG_FILTER_TRANSIENT_FAIL_MS = 2 * 60_000;
+const TRANSIENT_REASONS = new Set<string>([
+  RUG_FILTER_REASONS.noRpc,
+  RUG_FILTER_REASONS.rpcError,
+]);
+
+export class RugVerdictCache {
+  private readonly fails = new Map<string, { until: number; reason: string; detail: string }>();
+  constructor(private readonly cooldownMs: number) {}
+
+  get(mint: string, nowMs: number): { reason: string; detail: string; until: number } | null {
+    const f = this.fails.get(mint);
+    if (!f) return null;
+    if (nowMs >= f.until) {
+      this.fails.delete(mint);
+      return null;
+    }
+    return f;
+  }
+
+  record(mint: string, decision: RugFilterDecision, nowMs: number): void {
+    if (decision.allow || !decision.reason) return;
+    if (this.cooldownMs <= 0) return;
+    const transient = TRANSIENT_REASONS.has(decision.reason);
+    const until = nowMs + (transient ? Math.min(this.cooldownMs, RUG_FILTER_TRANSIENT_FAIL_MS) : this.cooldownMs);
+    const prev = this.get(mint, nowMs);
+    // Never let a transient error shorten a real verdict.
+    if (prev && prev.until >= until) return;
+    this.fails.set(mint, { until, reason: decision.reason, detail: decision.detail });
+    if (this.fails.size > 5_000) {
+      for (const [k, v] of this.fails) if (v.until <= nowMs) this.fails.delete(k);
+    }
+  }
+
+  size(): number {
+    return this.fails.size;
+  }
 }
 
 async function checkSameSlot(
