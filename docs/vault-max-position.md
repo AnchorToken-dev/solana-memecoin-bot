@@ -20,7 +20,7 @@ Paper risk controls so a hot overnight session cannot all-in every dollar.
   (cash profit **above the bankroll floor**; does **not** use open-position unrealized MTM).
 - **Return** — `POST /vault/return { "amountUsd": N }` moves vault → tradable (paper convenience).
 
-Sizing always uses **tradable cash only**. After a skim, `positionSizePct` and `maxPositionUsd` apply to the reduced cash — vault never funds an entry.
+Sizing always uses **tradable cash only** — vault never funds an entry. After a skim, if tradable cash can't cover the **full** selected trade size, buying pauses (`/status` → `buyingPaused`, one log line + one alert) until cash is added or the vault is returned. The bot never buys a smaller position with what's left.
 
 ### Reset behavior (documented choice)
 
@@ -38,13 +38,15 @@ Rationale: Mark locks overnight profit away; a session Reset for a fresh daily-l
 |---------|---------|-------------|
 | `maxPositionUsd` | `25` | `MAX_POSITION_USD` / PATCH `/config` |
 
-Entry notional:
+Entry notional is **exactly the selected trade size** ($15 / $30 / $60, clamped to the active cap when the button is chosen) — full size or no buy:
 
 ```text
-min(cash × positionSizePct, maxPositionUsd if > 0, cash)
+size = tradeSize.effectiveUsd
+buy only if tradable cash ≥ size + costs charged on top of it (0 in the realistic model: fees come out of the size)
+           and size ≤ maxPositionUsd (if > 0)
 ```
 
-`0` disables the hard USD cap (percent-of-cash sizing only).
+`0` disables the hard USD cap. `positionSizePct` no longer sizes buys (it could only shrink a buy below the selected size).
 
 ### Sticky with presets
 

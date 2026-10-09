@@ -18,7 +18,9 @@ export type SessionEventType =
   | "live_sell_failed"
   | "live_buy_unconfirmed"
   | "vault_sweep"
-  | "vault_sweep_failed";
+  | "vault_sweep_failed"
+  | "buying_paused"
+  | "buying_resumed";
 
 export interface SessionEvent {
   id: string;

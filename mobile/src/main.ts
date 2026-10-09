@@ -1320,6 +1320,8 @@ function tradeSizeCard(status: Record<string, unknown>): string {
       }
     | undefined;
   if (!ts) return "";
+  // Buying paused: not enough cash / wallet SOL for the full size (the bot never buys smaller).
+  const paused = status.buyingPaused as { message?: string } | null | undefined;
   const btns = ts.options
     .map(
       (o) => `<div class="size-opt">
@@ -1333,6 +1335,7 @@ function tradeSizeCard(status: Record<string, unknown>): string {
       <h2>Trade size</h2>
       <div class="size-big">$${ts.effectiveUsd} <span>per trade</span></div>
       ${ts.warning ? `<p class="warn-text">${escapeHtml(ts.warning)}</p>` : ""}
+      ${paused?.message ? `<p class="warn-text">⏸️ ${escapeHtml(paused.message)}</p>` : ""}
       <div class="size-row">${btns}</div>
       <p class="muted">Applies to new buys only. Coins already held keep their size.</p>
     </div>`;

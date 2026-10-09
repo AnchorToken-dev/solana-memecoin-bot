@@ -1,9 +1,17 @@
 import type { BotConfig, Position } from "../types.js";
+import { checkEntryCash, type EntryFundsCheck } from "./entryFunds.js";
 
 export interface SizeRequest {
   cashUsd: number;
   markPrice: number;
   openCount: number;
+  /**
+   * Selected trade size (tradeSize.effectiveUsd). When set, the entry is
+   * exactly this size or it is refused — never shrunk to fit cash or a cap.
+   */
+  targetUsd?: number;
+  /** Costs charged on top of the size by the active cost model (USD). */
+  extraCostsUsd?: number;
 }
 
 export interface SizeResult {
@@ -11,12 +19,17 @@ export interface SizeResult {
   notionalUsd: number;
   qty: number;
   reason?: string;
+  /** Set when a fixed-size entry was refused for lack of cash / an over-cap size. */
+  funds?: Extract<EntryFundsCheck, { ok: false }>;
 }
 
 /**
  * Risk gates:
  *  - Never exceed MAX_OPEN_TRADES (default 1)
- *  - Size = min(cash * POSITION_SIZE_PCT, maxPositionUsd if >0, cash)
+ *  - With targetUsd (the engine always passes the selected trade size):
+ *    size = targetUsd exactly; refused if tradable cash can't cover it plus
+ *    costs charged on top, or if it is above maxPositionUsd. Never shrunk.
+ *  - Without targetUsd (legacy helper): min(cash * POSITION_SIZE_PCT, maxPositionUsd if >0, cash)
  *  - cashUsd must be TRADABLE only (caller passes ledger.cash after vault skim)
  *  - Refuse zero/negative price
  *  - Refuse new entries when session daily loss cap is hit
@@ -49,6 +62,18 @@ export function sizePosition(
       qty: 0,
       reason: "invalid mark price",
     };
+  }
+  if (req.targetUsd != null) {
+    if (!(req.targetUsd > 0)) return { ok: false, notionalUsd: 0, qty: 0, reason: "trade size not set" };
+    const funds = checkEntryCash({
+      sizeUsd: req.targetUsd,
+      cashUsd: req.cashUsd,
+      extraCostsUsd: req.extraCostsUsd,
+      capUsd: cfg.maxPositionUsd > 0 ? cfg.maxPositionUsd : null,
+      capName: "MAX_POSITION_USD",
+    });
+    if (!funds.ok) return { ok: false, notionalUsd: 0, qty: 0, reason: funds.message, funds };
+    return { ok: true, notionalUsd: req.targetUsd, qty: req.targetUsd / req.markPrice };
   }
   if (req.cashUsd <= 0) {
     return {
