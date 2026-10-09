@@ -246,11 +246,16 @@ function mkBroker(rpc: MockRpc, mode: "live" | "live_dry_run" = "live", env: Rec
 }
 
 describe("LiveBroker", () => {
-  const buyArgs = { mint: MINT, symbol: "TST", markPrice: 0.00003, notionalUsd: 100, solUsd: 118 };
+  const buyArgs = { mint: MINT, symbol: "TST", markPrice: 0.00003, notionalUsd: 15, solUsd: 118 };
 
-  it("caps notional at LIVE_MAX_POSITION_USD and records real on-chain fill", async () => {
+  it("refuses (never shrinks) a buy above LIVE_MAX_POSITION_USD; exact size at the cap fills from the on-chain delta", async () => {
     const rpc = new MockRpc({ meta: buyMeta });
     const { broker, builder } = mkBroker(rpc, "live", { LIVE_MAX_POSITION_USD: "15" });
+    const over = await broker.buy({ ...buyArgs, notionalUsd: 100 });
+    assert.equal(over.ok, false);
+    assert.match((over as { reason: string }).reason, /above LIVE_MAX_POSITION_USD/);
+    assert.equal(builder.calls.length, 0);
+    assert.equal(rpc.sends, 0);
     const r = await broker.buy(buyArgs);
     assert.ok(r.ok);
     assert.equal(builder.calls[0]!.amount, Number((15 / 118).toFixed(6)));
@@ -731,7 +736,7 @@ describe("LIVE DRY-RUN realistic costs (same model as paper)", () => {
     const run = async (costs?: DryRunCostModel) => {
       const rpc = new MockRpc({ meta: buyMeta });
       const { broker } = mkBroker(rpc, "live", { LIVE_MAX_POSITION_USD: "15" }, costs);
-      const b = await broker.buy({ ...buy15, notionalUsd: 100, solUsd: 118, venue: "pumpswap", liquidityUsd: 500 });
+      const b = await broker.buy({ ...buy15, notionalUsd: 15, solUsd: 118, venue: "pumpswap", liquidityUsd: 500 });
       assert.ok(b.ok);
       rpc.kind = "sell";
       const s = await broker.sell({ position: b.position, markPrice: 0.00003, reason: "stop_loss", solUsd: 118 });

@@ -21,6 +21,7 @@ import { compensateBuy, isSolQuoteMint, MAX_PUMPSWAP_QUOTE_GAP, readPumpSwapQuot
 import { computeOnChainDelta, LAMPORTS_PER_SOL } from "./fills.js";
 import { redactSecrets } from "./redact.js";
 import { sellSlippageLadder, type LiveSettings } from "./mode.js";
+import { checkLiveWalletFunds, type EntryFundsCheck } from "../risk/entryFunds.js";
 import {
   computeBuyCosts,
   computeSellCosts,
@@ -107,6 +108,8 @@ const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
 export class LiveBroker {
   readonly mode: LiveExecMode;
+  /** Wallet funding check from the most recent buy() (null = not reached). Read by the engine. */
+  lastFundsCheck: EntryFundsCheck | null = null;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
 
@@ -229,9 +232,18 @@ export class LiveBroker {
     quoteMint?: string | null;
   }): Promise<BuyResult> {
     const s = this.d.settings;
-    const notionalUsd = Math.min(args.notionalUsd, s.maxPositionUsd);
+    this.lastFundsCheck = null;
+    // Full size or nothing: never shrink a buy to fit the cap or the wallet.
+    const notionalUsd = args.notionalUsd;
     if (!(args.solUsd > 0)) return { ok: false, reason: "no SOL/USD rate — cannot size a live buy" };
     if (!(notionalUsd > 0)) return { ok: false, reason: "zero notional" };
+    if (notionalUsd > s.maxPositionUsd + 1e-9) {
+      return {
+        ok: false,
+        reason: `trade size $${notionalUsd} is above LIVE_MAX_POSITION_USD ($${s.maxPositionUsd}) — refusing (never buys smaller than the selected size)`,
+        kind: "not_coin_specific",
+      };
+    }
     const solAmount = Number((notionalUsd / args.solUsd).toFixed(6));
     let balance: number;
     try {
@@ -239,9 +251,22 @@ export class LiveBroker {
     } catch (err) {
       return { ok: false, reason: `balance check: ${redactSecrets(err)}` };
     }
-    const needed = solAmount + s.priorityFeeMaxSol + s.minSolReserve;
-    if (balance < needed) {
-      return { ok: false, reason: `insufficient SOL: have ${balance.toFixed(4)}, need ${needed.toFixed(4)} (incl. reserve ${s.minSolReserve})` };
+    // Spendable = balance − min reserve − priority-fee cap − rent − fees; must cover the FULL amount.
+    const funds = checkLiveWalletFunds({
+      balanceSol: balance,
+      sizeUsd: notionalUsd,
+      solUsd: args.solUsd,
+      minSolReserve: s.minSolReserve,
+      priorityFeeMaxSol: s.priorityFeeMaxSol,
+    });
+    this.lastFundsCheck = funds;
+    if (!funds.ok) {
+      return {
+        ok: false,
+        reason: `insufficient SOL: have ${balance.toFixed(4)}, need ${funds.neededSol.toFixed(4)} (incl. reserve ${s.minSolReserve}, priority-fee cap, rent and fees)`,
+        kind: "not_coin_specific",
+        plain: funds.message,
+      };
     }
     if (!isSolQuoteMint(args.quoteMint)) {
       return {

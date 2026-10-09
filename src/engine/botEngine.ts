@@ -64,6 +64,13 @@ import { dryRunCostModelFromConfig, LiveBroker } from "../live/liveBroker.js";
 import { BuyCooldowns, formatCooldown } from "../live/buyCooldown.js";
 import { classifyReason } from "../live/pumpErrors.js";
 import { checkPaperBuyable } from "../risk/paperBuyable.js";
+import {
+  checkEntryCash,
+  checkLiveWalletFunds,
+  liveBuyOverheadSol,
+  type BuyingPausedStatus,
+  type EntryFundsCheck,
+} from "../risk/entryFunds.js";
 import { loadLiveSigner } from "../live/keypair.js";
 import { HttpsLiveRpc } from "../live/rpc.js";
 import { PumpPortalBuilder } from "../live/pumpportal.js";
@@ -151,6 +158,12 @@ export interface EngineStatus {
   hardDailyLoss: HardDailyLossStatus;
   /** Live vault sweep (null in paper). Address shown masked only. */
   vaultSweep: VaultSweepStatus | null;
+  /**
+   * Set when new buys are paused because the full trade size can't be
+   * afforded (tradable cash / wallet SOL) or is above a cap. Never shrinks
+   * the buy instead. null = buying normally.
+   */
+  buyingPaused: BuyingPausedStatus | null;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -227,6 +240,10 @@ export class BotEngine {
   private liveSolBalance: number | null = null;
   private liveSolBalanceAt: number | null = null;
   private lastLiveError: string | null = null;
+  /** Full-size entry funding: ledger cash / cap (checked every cycle) and live wallet SOL (checked at buy). */
+  private cashBlock: Extract<EntryFundsCheck, { ok: false }> | null = null;
+  private walletBlock: Extract<EntryFundsCheck, { ok: false }> | null = null;
+  private buyingPaused: BuyingPausedStatus | null = null;
   private readonly sellFailAlerted = new Set<string>();
   readonly tradeSizeStore: TradeSizeStore;
   readonly hardLossStore: HardDailyLossStore;
@@ -359,7 +376,112 @@ export class BotEngine {
       tradeSize: this.getTradeSize(),
       hardDailyLoss: this.getHardDailyLoss(),
       vaultSweep: this.getVaultSweepStatus(),
+      buyingPaused: this.buyingPaused,
     };
+  }
+
+  /**
+   * Costs a buy charges ON TOP of the trade size to the tradable cash ledger.
+   * Paper (both models) and realistic dry-run take fees out of the size → 0.
+   * Legacy dry-run adds the priority fee; real live adds priority cap + rent +
+   * network + venue fees (the wallet check in LiveBroker is the hard guard).
+   */
+  private entryExtraCostsUsd(sizeUsd: number, solUsd: number | null): number {
+    const live = this.cfg.live;
+    if (!this.isLiveMode() || !live || solUsd == null || !(solUsd > 0)) return 0;
+    if (this.tradingMode === "live_dry_run") {
+      return this.cfg.paperBroker.fees?.model === "realistic" ? 0 : live.priorityFeeSol * solUsd;
+    }
+    return liveBuyOverheadSol(sizeUsd / solUsd, live.priorityFeeMaxSol) * solUsd;
+  }
+
+  private setCashBlock(b: Extract<EntryFundsCheck, { ok: false }> | null): void {
+    this.cashBlock = b;
+    this.updateBuyingPaused();
+  }
+
+  private setWalletBlock(b: Extract<EntryFundsCheck, { ok: false }> | null): void {
+    this.walletBlock = b;
+    this.updateBuyingPaused();
+  }
+
+  /** Log + alert once per state change (not every cycle). */
+  private updateBuyingPaused(): void {
+    const b = this.cashBlock ?? this.walletBlock;
+    const sizeUsd = this.getTradeSize().effectiveUsd;
+    const prev = this.buyingPaused;
+    if (!b) {
+      if (prev) {
+        this.buyingPaused = null;
+        const what = prev.reason === "insufficient_sol" ? "SOL in the wallet" : prev.reason === "size_above_cap" ? "the cap" : "cash";
+        const msg =
+          prev.reason === "size_above_cap"
+            ? `Buying resumed — trade size $${sizeUsd} is within the cap again`
+            : `Buying resumed — enough ${what} for a $${sizeUsd} trade again`;
+        log.info(msg);
+        this.events.push("buying_resumed", "▶️ Buying resumed", msg, { sizeUsd });
+      }
+      return;
+    }
+    const next: BuyingPausedStatus = {
+      reason: b.reason,
+      message: b.message,
+      sizeUsd,
+      availableUsd: b.availableUsd,
+      neededUsd: b.neededUsd,
+      since: prev?.since ?? Date.now(),
+    };
+    if (prev && prev.reason === next.reason && prev.sizeUsd === next.sizeUsd) {
+      // Same state: refresh numbers quietly (no log / alert spam).
+      this.buyingPaused = next;
+      return;
+    }
+    this.buyingPaused = { ...next, since: Date.now() };
+    log.warn(b.message);
+    this.events.push("buying_paused", "⏸️ Buying paused", b.message, {
+      reason: b.reason,
+      sizeUsd,
+      availableUsd: b.availableUsd,
+      neededUsd: b.neededUsd,
+    });
+  }
+
+  /**
+   * Before scanning: can tradable cash (and, if it was short last time, the
+   * live wallet) cover the FULL selected size? false = skip this cycle's buys.
+   */
+  private async entryFundsReady(): Promise<boolean> {
+    const cfg = this.cfg;
+    const sizeUsd = this.getTradeSize().effectiveUsd;
+    const solUsd = this.isLiveMode() ? await this.resolveQuoteUsdRate() : null;
+    const cash = checkEntryCash({
+      sizeUsd,
+      cashUsd: this.ledger.cash,
+      extraCostsUsd: this.entryExtraCostsUsd(sizeUsd, solUsd),
+      capUsd: cfg.maxPositionUsd > 0 ? cfg.maxPositionUsd : null,
+      capName: "MAX_POSITION_USD",
+    });
+    this.setCashBlock(cash.ok ? null : cash);
+    if (!cash.ok) return false;
+    // Wallet was short last time: re-check from a (≤60s old) balance instead of
+    // scanning + rug-checking coins we can't pay for. LiveBroker re-checks at buy.
+    if (this.walletBlock && this.liveBroker && cfg.live && solUsd != null && solUsd > 0) {
+      if (this.liveSolBalanceAt == null || Date.now() - this.liveSolBalanceAt > 60_000) {
+        await this.refreshLiveBalance();
+      }
+      if (this.liveSolBalance != null) {
+        const w = checkLiveWalletFunds({
+          balanceSol: this.liveSolBalance,
+          sizeUsd,
+          solUsd,
+          minSolReserve: cfg.live.minSolReserve,
+          priorityFeeMaxSol: cfg.live.priorityFeeMaxSol,
+        });
+        this.setWalletBlock(w.ok ? null : w);
+        if (!w.ok) return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -1504,6 +1626,7 @@ export class BotEngine {
     }
 
     this.ledger.resetSession(this.cfg.bankrollUsd);
+    this.setCashBlock(null);
     this.cycle = 0;
     this.startedAt = null;
     this.stoppedAt = null;
@@ -1872,6 +1995,12 @@ export class BotEngine {
       }
     }
 
+    // Full size or nothing: don't even scan when the selected size can't be paid for.
+    if (!(await this.entryFundsReady())) {
+      log.debug(`Cycle ${cycle}: buying paused — ${this.buyingPaused?.message ?? "not enough funds"}`);
+      return false;
+    }
+
     const snaps = await this.selectEntrySnapshots();
 
     const openMints = new Set(ledger.openPositions.map((p) => p.mint));
@@ -1919,24 +2048,30 @@ export class BotEngine {
     }
 
     const entry = usable[0]!;
-    // Size off tradable cash only — vault is excluded from ledger.cash after skim.
+    // Every new buy is exactly the hot-button size (already clamped to the active
+    // cap). Tradable cash only — vault is excluded from ledger.cash after skim.
+    // Not enough for the full size → skip; never shrink to what's left.
+    const tradeSize = this.getTradeSize();
     const sized = sizePosition(
       {
         cashUsd: ledger.cash,
         markPrice: entry.priceUsd,
         openCount: ledger.openPositions.length,
+        targetUsd: tradeSize.effectiveUsd,
+        extraCostsUsd: this.entryExtraCostsUsd(
+          tradeSize.effectiveUsd,
+          this.isLiveMode() ? await this.resolveQuoteUsdRate() : null,
+        ),
       },
       cfg,
       ledger.realizedPnl,
     );
 
     if (!sized.ok) {
-      log.info(`Skip entry ${entry.symbol}: ${sized.reason}`);
+      if (sized.funds) this.setCashBlock(sized.funds);
+      else log.info(`Skip entry ${entry.symbol}: ${sized.reason}`);
       return false;
     }
-    // Hot-button size (already clamped to the active cap) bounds every new buy.
-    const tradeSize = this.getTradeSize();
-    sized.notionalUsd = Math.min(sized.notionalUsd, tradeSize.effectiveUsd);
 
     if (cfg.requireChecklistGo && !this.checklist.hasGoForMint(entry.mint)) {
       log.info(
@@ -2007,13 +2142,20 @@ export class BotEngine {
         mint: entry.mint,
         symbol: entry.symbol,
         markPrice: entry.priceUsd,
-        notionalUsd: Math.min(sized.notionalUsd, cfg.live.maxPositionUsd),
+        // Exact size; LiveBroker refuses (never shrinks) above LIVE_MAX_POSITION_USD or when the wallet is short.
+        notionalUsd: sized.notionalUsd,
         solUsd,
         // Dry-run cost estimate only (venue fee tier + size-aware slippage); live ignores these.
         ...(liveSnap?.venue ? { venue: liveSnap.venue } : {}),
         ...(liveSnap && liveSnap.liquidityUsd > 0 ? { liquidityUsd: liveSnap.liquidityUsd } : {}),
         ...(liveSnap?.quoteMint ? { quoteMint: liveSnap.quoteMint } : {}),
       });
+      const funds = this.liveBroker.lastFundsCheck;
+      if (funds) this.setWalletBlock(funds.ok ? null : funds);
+      if (!res.ok && funds && !funds.ok) {
+        // Wallet can't cover the full size: paused (logged/alerted once), not a coin failure.
+        return false;
+      }
       if (!res.ok) {
         // No position recorded → no ghost. Loud only when the chain state is unknown.
         const msg = redactSecrets(res.reason).slice(0, 400);

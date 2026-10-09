@@ -19,7 +19,7 @@ The **engine stays on a laptop/server**. The optional **Android APK** is only a 
 | Max hold (time stop) | `20` minutes | `MAX_HOLD_MINUTES` (0 = off) |
 | Daily loss cap | `$5` realized | `DAILY_LOSS_USD` (0 = off; stops runner; vs session PnL, not growing equity) |
 | Chase lockout | `12` hours after **full original deposit** loss | `CHASE_LOCKOUT_HOURS` (0 = off; laptop/API disk; Reset does not unlock) |
-| Position size | `95%` of **tradable** cash | `POSITION_SIZE_PCT` |
+| Position size | the selected trade size ($15 / $30 / $60), **full size or no buy** | app buttons / `POST /config/trade-size`; `POSITION_SIZE_PCT` is legacy (no longer shrinks buys) |
 | Max position (hard) | `$25` per open trade | `MAX_POSITION_USD` (0 = off; sticky) |
 | Momentum window | `5` minutes | `MOMENTUM_WINDOW_MINUTES` |
 | Min window change | `+8%` | `MOMENTUM_MIN_PCT` |
@@ -79,7 +79,8 @@ Presets never change `PAPER_MODE`, `MARKET_DATA_SOURCE`, or ledger/wallet paths.
 7. **Daily loss cap** — when session realized PnL ≤ `−DAILY_LOSS_USD`, the runner stops (no new paper entries). Cap is a fixed USD amount vs session realized PnL (**not** growing equity). **Start does not clear the ledger** — use `POST /runner/reset` (or Start with `?reset=1`) / the app **Reset** button on the **PnL** tab to restore `BANKROLL_USD` cash and clear the *daily-loss* stop.
 8. **Chase lockout** (paper preview for future live) — when session realized PnL ≤ `−BANKROLL_USD` (full loss of the **original deposit**, not peak equity), trading locks for `CHASE_LOCKOUT_HOURS` (default 12). Lock lives in `data/chase-lockout.json` on the laptop/API so phone restart cannot bypass. **Reset does not clear an active chase lockout** (timer-only unlock). See [docs/chase-lockout.md](docs/chase-lockout.md).
 9. **Vault skim** — `POST /vault/skim` locks cash into `vaultUsd` (excluded from sizing). Survives Reset. Optional `POST /vault/return`.
-10. **Max position** — entry notional ≤ `MAX_POSITION_USD` (default `$25`) in addition to `POSITION_SIZE_PCT` × tradable cash.
+10. **Max position** — entry notional ≤ `MAX_POSITION_USD` (default `$25`).
+11. **Full size or nothing** — every new buy is exactly the selected trade size. If tradable cash (paper / dry-run) or the live wallet's spendable SOL (after `LIVE_MIN_SOL_RESERVE`, the priority-fee cap and rent) can't cover it, the bot skips buying and shows e.g. *"Not enough cash for a $15 trade ($2.93 available) — buying paused until cash is added or the vault is moved back"* in the log, as one alert, and in `/status` → `buyingPaused` (logged once per change, not every cycle). It never opens a smaller position.
 
 ## Quick start (paper mode, Linux)
 
