@@ -88,6 +88,27 @@ const ConfigSchema = z.object({
   rugFilterGradMaxTop10Pct: z.number().gt(0).lte(100).optional(),
   rugFilterFailCooldownMinutes: z.number().gte(0).optional(),
   fastExitPollMs: z.number().gte(0).optional(),
+  entryGuard: z
+    .object({
+      maxRunupPct: z.number().gte(0),
+      minCoinAgeMinutes: z.number().gte(0),
+      maxWindowVolumeSharePct: z.number().gte(0).lte(100),
+      maxPullbackPct: z.number().gte(0).lte(100),
+      pullbackWindowSec: z.number().gt(0),
+      maxDownTicks: z.number().int().gte(0),
+    })
+    .optional(),
+  earlyExit: z
+    .object({
+      fastDropPct: z.number().gte(0).lte(100),
+      fastDropWindowMs: z.number().gt(0),
+      redTicks: z.number().int().gte(0),
+      redTicksMinDropPct: z.number().gte(0).lte(100),
+      givebackArmPct: z.number().gte(0),
+      givebackPct: z.number().gt(0).lte(100),
+      stallSeconds: z.number().gte(0),
+    })
+    .optional(),
 });
 
 /** Paper-safe knobs allowed on PATCH /config. */
@@ -599,6 +620,24 @@ export function loadConfig(opts?: {
       file.rugFilterFailCooldownMinutes ?? DEFAULT_RUG_FILTER_FAIL_COOLDOWN_MINUTES,
     ),
     fastExitPollMs: envNum("FAST_EXIT_POLL_MS", file.fastExitPollMs ?? 1_000),
+    // Oct 9 review filters/exits: env only, every one 0/off unless set.
+    entryGuard: {
+      maxRunupPct: envNum("ENTRY_MAX_RUNUP_PCT", 0),
+      minCoinAgeMinutes: envNum("ENTRY_MIN_COIN_AGE_MINUTES", 0),
+      maxWindowVolumeSharePct: envNum("ENTRY_MAX_WINDOW_VOLUME_SHARE_PCT", 0),
+      maxPullbackPct: envNum("ENTRY_MAX_PULLBACK_PCT", 0),
+      pullbackWindowSec: envNum("ENTRY_PULLBACK_WINDOW_SEC", 120),
+      maxDownTicks: envNum("ENTRY_MAX_DOWN_TICKS", 0),
+    },
+    earlyExit: {
+      fastDropPct: envNum("EXIT_FAST_DROP_PCT", 0),
+      fastDropWindowMs: envNum("EXIT_FAST_DROP_WINDOW_MS", 3_000),
+      redTicks: envNum("EXIT_RED_TICKS", 0),
+      redTicksMinDropPct: envNum("EXIT_RED_TICKS_MIN_DROP_PCT", 3),
+      givebackArmPct: envNum("EXIT_GIVEBACK_ARM_PCT", 0),
+      givebackPct: envNum("EXIT_GIVEBACK_PCT", 50),
+      stallSeconds: envNum("EXIT_STALL_SECONDS", 0),
+    },
   };
 
   if (!opts?.skipRuntimeOverlay) {

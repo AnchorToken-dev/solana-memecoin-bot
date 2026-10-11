@@ -115,6 +115,14 @@ export function exitTitle(reason: string | undefined): string {
       return "Manual exit";
     case "time_stop":
       return "Time stop";
+    case "early_fast_drop":
+      return "Early exit: fast drop";
+    case "early_red_ticks":
+      return "Early exit: selling pressure";
+    case "early_giveback":
+      return "Early exit: gave back gains";
+    case "early_stall":
+      return "Early exit: stalled below entry";
     default:
       return "Position closed";
   }

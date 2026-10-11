@@ -143,6 +143,16 @@ export interface BotConfig {
    */
   fastExitPollMs?: number;
   /**
+   * Extra entry filters from the Oct 9 live review (buying the top). All off
+   * by default (0 = off). Optional so older fixtures compile.
+   */
+  entryGuard?: EntryGuardParams;
+  /**
+   * Early-warning exits on the fast on-chain mark (Oct 9 review). All off by
+   * default (0 = off). Optional so older fixtures compile.
+   */
+  earlyExit?: EarlyExitParams;
+  /**
    * Resolved trading mode. Absent / "paper" = today's behaviour.
    * Set by loadConfig from the live gates (see src/live/mode.ts).
    */
@@ -156,6 +166,52 @@ export interface BotConfig {
   hardDailyLossUsd?: number;
   /** Clamp warnings from env/config/overlay/PATCH. */
   hardDailyLossWarnings?: string[];
+}
+
+/** Entry filters (0 = off). See src/strategy/entryGuard.ts. */
+export interface EntryGuardParams {
+  /** Skip when the window % change (5m) is above this. ENTRY_MAX_RUNUP_PCT. */
+  maxRunupPct: number;
+  /**
+   * Skip coins younger than this many minutes. Uses createdAt; when unknown,
+   * treats "nearly all 24h volume happened inside the window" as brand new.
+   * ENTRY_MIN_COIN_AGE_MINUTES. Independent of momentum.minAgeMinutes, which
+   * the sniper preset sets to 0.
+   */
+  minCoinAgeMinutes: number;
+  /**
+   * Skip when the window volume is at least this % of 24h volume (the coin
+   * basically only exists since the window started). ENTRY_MAX_WINDOW_VOLUME_SHARE_PCT.
+   */
+  maxWindowVolumeSharePct: number;
+  /**
+   * Skip when the price is this % or more below the highest price the bot
+   * saw for the coin in the last pullbackWindowSec (momentum fading).
+   * ENTRY_MAX_PULLBACK_PCT.
+   */
+  maxPullbackPct: number;
+  /** ENTRY_PULLBACK_WINDOW_SEC (default 120). */
+  pullbackWindowSec: number;
+  /** Skip after this many lower scan prices in a row ("red candles"). ENTRY_MAX_DOWN_TICKS. */
+  maxDownTicks: number;
+}
+
+/** Early-warning exits (0 = off). See src/strategy/earlyExit.ts. */
+export interface EarlyExitParams {
+  /** Sell when the on-chain mark falls this % within fastDropWindowMs. EXIT_FAST_DROP_PCT. */
+  fastDropPct: number;
+  /** EXIT_FAST_DROP_WINDOW_MS (default 3000). */
+  fastDropWindowMs: number;
+  /** Sell after this many lower on-chain reads in a row... EXIT_RED_TICKS. */
+  redTicks: number;
+  /** ...that add up to at least this % drop. EXIT_RED_TICKS_MIN_DROP_PCT (default 3). */
+  redTicksMinDropPct: number;
+  /** Once up this % from entry, arm the giveback exit. EXIT_GIVEBACK_ARM_PCT. */
+  givebackArmPct: number;
+  /** Sell when this % of the peak gain is given back. EXIT_GIVEBACK_PCT (default 50). */
+  givebackPct: number;
+  /** Sell when no new high for this many seconds and below entry. EXIT_STALL_SECONDS. */
+  stallSeconds: number;
 }
 
 export interface TokenSnapshot {
@@ -212,7 +268,12 @@ export type ExitReason =
   | "manual_exit"
   | "risk_flat"
   /** Restored position whose tokens were no longer in the wallet at live start (no sell attempted). */
-  | "reconciled_missing";
+  | "reconciled_missing"
+  /** Early-warning exits (src/strategy/earlyExit.ts). */
+  | "early_fast_drop"
+  | "early_red_ticks"
+  | "early_giveback"
+  | "early_stall";
 
 export interface Position {
   id: string;
@@ -270,6 +331,14 @@ export interface Fill {
   signature?: string | null;
   /** Itemised paper costs for this fill (realistic paper model only). */
   feeBreakdown?: FeeBreakdown;
+  /** Sells: the mark that triggered the exit decision (fill price can differ). */
+  decisionMarkPrice?: number;
+  /**
+   * Sells: plain-English warning when the fill doesn't match the exit label,
+   * e.g. a take_profit decision that filled at a loss because the price
+   * collapsed before the sell landed.
+   */
+  exitWarning?: string;
 }
 
 export interface TradeRecord {
@@ -305,7 +374,11 @@ export type EntryRejectReason =
   | "low_liquidity"
   | "low_volume_24h"
   | "no_momentum"
-  | "no_volume_spike";
+  | "no_volume_spike"
+  /** Entry guard (src/strategy/entryGuard.ts). */
+  | "run_too_far"
+  | "brand_new"
+  | "fading";
 
 export interface EntryReject {
   mint: string;

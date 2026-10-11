@@ -54,6 +54,19 @@ import {
 import { ReadOnlySolanaRpc } from "../solana/rpc.js";
 import { OnchainPriceReader, type OnchainVenue } from "../market/onchainPrice.js";
 import {
+  DEFAULT_ENTRY_GUARD,
+  ScanPriceHistory,
+  entryGuardActive,
+  evaluateEntryGuard,
+} from "../strategy/entryGuard.js";
+import {
+  DEFAULT_EARLY_EXIT,
+  PositionMarkHistory,
+  earlyExitActive,
+  evaluateEarlyExit,
+} from "../strategy/earlyExit.js";
+import { exitFillWarning } from "../strategy/exitFill.js";
+import {
   ReadOnlySolanaWs,
   emptySolanaWsStatus,
   type SolanaWsPublicStatus,
@@ -212,6 +225,16 @@ export interface OpenPositionsReport {
   positionRecovery: PositionRecoveryStatus | null;
 }
 
+/**
+ * Session ledger / vault dir for the live modes. Real money (live) and the
+ * dry-run practice ledger are kept apart: on Oct 9 the live ledger showed
+ * "vault=$250" carried over from dry-run SIMULATED sweeps — no SOL was ever
+ * swept on-chain.
+ */
+export function liveLedgerDir(cfg: BotConfig): string {
+  return cfg.tradingMode === "live_dry_run" ? join(cfg.ledgerDir, "live-dry-run") : join(cfg.ledgerDir, "live");
+}
+
 /** FAST_EXIT_POLL_MS: 0 = off; otherwise clamped to ≥250ms. Default 1000. */
 export const DEFAULT_FAST_EXIT_POLL_MS = 1_000;
 export function fastExitPollMs(cfg: BotConfig): number {
@@ -310,6 +333,10 @@ export class BotEngine {
   private readonly onchainPrice: OnchainPriceReader | null;
   /** Last on-chain read per mint (reused by the slower full tick). */
   private readonly onchainMarks = new Map<string, { usd: number; at: number; venue: OnchainVenue }>();
+  /** Entry guard: prices seen per mint across scans. */
+  private readonly scanPrices = new ScanPriceHistory();
+  /** Early-warning exits: recent marks per open position. */
+  private readonly markHistory = new PositionMarkHistory();
   /** Position id → last failed fast sell (backs off to the full-tick cadence). */
   private readonly fastSellFailAt = new Map<string, number>();
   /** Mints whose mark source was already logged once. */
@@ -366,7 +393,7 @@ export class BotEngine {
       deps?.ledger ??
       new PaperLedger(
         cfg.bankrollUsd,
-        this.isLiveMode(cfg) ? join(cfg.ledgerDir, "live") : cfg.ledgerDir,
+        this.isLiveMode(cfg) ? liveLedgerDir(cfg) : cfg.ledgerDir,
       );
     this.liveBroker = this.isLiveMode(cfg) ? (deps?.liveBroker ?? null) : null;
     this.tradeSizeStore = new TradeSizeStore(cfg.ledgerDir);
@@ -800,7 +827,7 @@ export class BotEngine {
       destination: { address: v.address, bytes: v.bytes },
       settings: loadVaultSweepSettings(env, live),
       mode: this.tradingMode === "live" ? "live" : "live_dry_run",
-      dataDir: join(this.cfg.ledgerDir, "live"),
+      dataDir: liveLedgerDir(this.cfg),
       sleep,
       onEvent: (kind, title, body, signature) => {
         this.events.push(kind, title, body, { signature });
@@ -1037,8 +1064,9 @@ export class BotEngine {
         reason,
         solUsd,
       });
+      const warn = this.tagExitFill(pos, fill, markPrice, reason, realizedPnlUsd);
       this.ledger.recordSell(fill, realizedPnlUsd, proceedsUsd);
-      await this.recordJournalClose(pos, fill, realizedPnlUsd);
+      await this.recordJournalClose(pos, fill, realizedPnlUsd, warn ?? undefined);
       return fill;
     }
     const solUsd = await this.liveSolUsd();
@@ -1052,11 +1080,30 @@ export class BotEngine {
       return null;
     }
     this.sellFailAlerted.delete(pos.id);
+    const warn = this.tagExitFill(pos, res.fill, markPrice, reason, res.realizedPnlUsd);
     this.ledger.recordSell(res.fill, res.realizedPnlUsd, res.proceedsUsd);
-    const note = res.notes.length > 0 ? redactSecrets(res.notes.join(" | ")).slice(0, 400) : undefined;
+    const parts = [...(warn ? [warn] : []), ...res.notes];
+    const note = parts.length > 0 ? redactSecrets(parts.join(" | ")).slice(0, 400) : undefined;
     await this.recordJournalClose(pos, res.fill, res.realizedPnlUsd, note);
     void this.refreshLiveBalance();
     return res.fill;
+  }
+
+  /** Stamp the decision mark on a sell fill and flag label/fill mismatches. */
+  private tagExitFill(
+    pos: Position,
+    fill: Fill,
+    markPrice: number,
+    reason: import("../types.js").ExitReason,
+    realizedPnlUsd: number,
+  ): string | null {
+    fill.decisionMarkPrice = markPrice;
+    const warn = exitFillWarning({ reason, decisionMarkPrice: markPrice, fillPrice: fill.price, realizedPnlUsd });
+    if (warn) {
+      fill.exitWarning = warn;
+      log.warn(`Exit fill mismatch ${pos.symbol}: ${warn}`);
+    }
+    return warn;
   }
 
   private liveSellFailed(pos: Position, detail: string): void {
@@ -1679,11 +1726,16 @@ export class BotEngine {
     this.hardLossStore.recordClose(fill.mode ?? "paper", realizedPnlUsd);
     const reason = fill.reason ?? "unknown";
     const pnlSign = realizedPnlUsd >= 0 ? "+" : "";
-    const body = `${position.symbol}: ${pnlSign}$${realizedPnlUsd.toFixed(2)} (${pnlSign}${entry.pnlPct.toFixed(1)}%) · ${reason}`;
-    // One notification per close: typed exit + PnL in body.
+    const warnTail = fill.exitWarning ? ` · ⚠️ ${fill.exitWarning}` : "";
+    const body = `${position.symbol}: ${pnlSign}$${realizedPnlUsd.toFixed(2)} (${pnlSign}${entry.pnlPct.toFixed(1)}%) · ${reason}${warnTail}`;
+    // One notification per close: typed exit + PnL in body. A "take-profit"
+    // that filled at a loss must not be titled as a win on the phone.
+    const title = fill.exitWarning && realizedPnlUsd < 0 && reason.includes("take_profit")
+      ? `${exitTitle(reason)} — filled at a LOSS`
+      : exitTitle(reason);
     this.events.push(
       exitEventType(reason),
-      exitTitle(reason),
+      title,
       body,
       {
         symbol: position.symbol,
@@ -2111,6 +2163,25 @@ export class BotEngine {
   }
 
   /**
+   * Early-warning exit (EXIT_* flags; all off by default). Records the mark
+   * first so the history includes it. Null when off or nothing fires.
+   */
+  private earlyExitSignal(
+    pos: Position,
+    mark: number,
+    nowMs: number,
+  ): { positionId: string; reason: import("../types.js").ExitReason; markPrice: number } | null {
+    this.markHistory.record(pos.id, mark, nowMs);
+    this.markHistory.retain(new Set(this.ledger.openPositions.map((p) => p.id)));
+    const p = this.cfg.earlyExit ?? DEFAULT_EARLY_EXIT;
+    if (!earlyExitActive(p)) return null;
+    const sig = evaluateEarlyExit(pos, mark, this.markHistory, p, nowMs);
+    if (!sig) return null;
+    log.info(`Early exit ${pos.symbol}: ${sig.reason} — ${sig.detail}`);
+    return { positionId: pos.id, reason: sig.reason, markPrice: mark };
+  }
+
+  /**
    * One fast exit pass: on-chain mark only (no Dex call), same evaluateExit as
    * the full tick; a hit sells right away. Positions without an on-chain mark
    * wait for the full tick (Dex fallback there).
@@ -2125,8 +2196,10 @@ export class BotEngine {
       const cur = this.ledger.openPositions.find((p) => p.id === pos.id);
       if (!cur) continue;
       this.lastMarks.set(cur.mint, mark);
-      const { position: updated, exit } = evaluateExit(cur, mark, this.cfg, Date.now());
+      const nowFast = Date.now();
+      const { position: updated, exit: baseExit } = evaluateExit(cur, mark, this.cfg, nowFast);
       this.ledger.replacePosition(updated);
+      const exit = baseExit ?? this.earlyExitSignal(updated, mark, nowFast);
       if (exit) {
         // A failed live sell is retried by the full tick (same cadence as before),
         // not hammered every fast tick.
@@ -2340,8 +2413,9 @@ export class BotEngine {
         continue;
       }
       this.lastMarks.set(pos.mint, mark);
-      const { position: updated, exit } = evaluateExit(pos, mark, cfg, now);
+      const { position: updated, exit: baseExit } = evaluateExit(pos, mark, cfg, now);
       ledger.replacePosition(updated);
+      const exit = baseExit ?? this.earlyExitSignal(updated, mark, now);
       if (exit) {
         if (!ledger.openPositions.some((p) => p.id === updated.id)) {
           continue;
@@ -2407,6 +2481,7 @@ export class BotEngine {
     }
 
     const snaps = await this.selectEntrySnapshots();
+    this.scanPrices.record(snaps, now);
 
     const openMints = new Set(ledger.openPositions.map((p) => p.mint));
     const { signals: entries, rejects } = evaluateEntries(
@@ -2444,6 +2519,17 @@ export class BotEngine {
         log.info(
           `Skip entry ${e.symbol}: ${chk.reason} (${chk.detail})${cd ? ` · skipping this coin for ${formatCooldown(cd.until - now)}` : ""}`,
         );
+        return false;
+      });
+    }
+    const guard = cfg.entryGuard ?? DEFAULT_ENTRY_GUARD;
+    if (entryGuardActive(guard)) {
+      usable = usable.filter((e) => {
+        const snap = snaps.find((s) => s.mint === e.mint);
+        if (!snap) return true;
+        const v = evaluateEntryGuard(snap, this.scanPrices.get(e.mint), guard, now);
+        if (v.ok) return true;
+        log.info(`Skip entry ${e.symbol}: ${v.reason} (${v.detail})`);
         return false;
       });
     }
