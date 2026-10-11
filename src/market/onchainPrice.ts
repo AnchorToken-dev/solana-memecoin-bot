@@ -31,6 +31,10 @@ export interface OnchainMark {
   /** SOL per whole token. */
   priceSol: number;
   venue: OnchainVenue;
+  /** Curve or pool account the price came from (GeckoTerminal pool id for both). */
+  market?: string;
+  /** SOL backing the price (curve virtual SOL / pool quote + virtual quote). Flow proxy for the price tape. */
+  quoteReserveSol?: number;
 }
 
 const CURVE_DISCRIMINATOR = [23, 183, 248, 55, 96, 216, 172, 96];
@@ -116,7 +120,9 @@ export class OnchainPriceReader {
         return this.read(mint);
       }
       const p = reservesPriceSol(c.virtualSolReserves, c.virtualTokenReserves, src.decimals);
-      return p == null ? null : { priceSol: p, venue: "bonding_curve" };
+      return p == null
+        ? null
+        : { priceSol: p, venue: "bonding_curve", market: src.curve, quoteReserveSol: Number(c.virtualSolReserves) / 1e9 };
     }
     const accs = await this.many([src.pool, src.baseVault, src.quoteVault]);
     if (!accs || !accs[0] || !accs[1] || !accs[2]) return null;
@@ -127,7 +133,9 @@ export class OnchainPriceReader {
     if (base == null || quote == null) return null;
     const virt = info.virtualQuoteLamports > 0n ? info.virtualQuoteLamports : 0n;
     const p = reservesPriceSol(quote + virt, base, src.decimals);
-    return p == null ? null : { priceSol: p, venue: "pumpswap" };
+    return p == null
+      ? null
+      : { priceSol: p, venue: "pumpswap", market: src.pool, quoteReserveSol: Number(quote + virt) / 1e9 };
   }
 
   private async resolve(mint: string): Promise<Source | null> {

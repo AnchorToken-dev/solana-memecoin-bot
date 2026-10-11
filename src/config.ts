@@ -109,6 +109,28 @@ const ConfigSchema = z.object({
       stallSeconds: z.number().gte(0),
     })
     .optional(),
+  entryPriceCheck: z
+    .object({
+      enabled: z.boolean(),
+      maxGapPct: z.number().gt(0),
+      mismatchSkipMinutes: z.number().gte(0),
+      fillAtOnchain: z.boolean(),
+    })
+    .optional(),
+  reentryCooldown: z
+    .object({
+      minutes: z.number().gte(0),
+      afterLossMinutes: z.number().gte(0),
+    })
+    .optional(),
+  priceTape: z
+    .object({
+      enabled: z.boolean(),
+      postExitSeconds: z.number().gte(0).lte(1_800),
+      postExitIntervalMs: z.number().gte(1_000),
+      preCandles: z.boolean(),
+    })
+    .optional(),
 });
 
 /** Paper-safe knobs allowed on PATCH /config. */
@@ -637,6 +659,23 @@ export function loadConfig(opts?: {
       givebackArmPct: envNum("EXIT_GIVEBACK_ARM_PCT", 0),
       givebackPct: envNum("EXIT_GIVEBACK_PCT", 50),
       stallSeconds: envNum("EXIT_STALL_SECONDS", 0),
+    },
+    // Oct 11 Nike review: ON by default (safety, not strategy).
+    entryPriceCheck: {
+      enabled: envBool("ENTRY_PRICE_CHECK", true),
+      maxGapPct: envNum("ENTRY_PRICE_MAX_GAP_PCT", 25),
+      mismatchSkipMinutes: envNum("ENTRY_PRICE_MISMATCH_SKIP_MINUTES", 10),
+      fillAtOnchain: envBool("PAPER_FILL_AT_ONCHAIN", true),
+    },
+    reentryCooldown: {
+      minutes: envNum("REENTRY_COOLDOWN_MINUTES", 30),
+      afterLossMinutes: envNum("REENTRY_COOLDOWN_AFTER_LOSS_MINUTES", 120),
+    },
+    priceTape: {
+      enabled: envBool("PRICE_TAPE", true),
+      postExitSeconds: envNum("PRICE_TAPE_POST_EXIT_SECONDS", 180),
+      postExitIntervalMs: envNum("PRICE_TAPE_POST_EXIT_INTERVAL_MS", 5_000),
+      preCandles: envBool("PRICE_TAPE_PRE_CANDLES", true),
     },
   };
 

@@ -34,3 +34,7 @@ mobile/android/captures/
 *.aab
 *.keystore
 *.jks
+
+# Oct 11: per-mode re-entry cooldowns + price tape (memory feature)
+data/**/reentry-cooldowns.json
+data/**/price-tape/

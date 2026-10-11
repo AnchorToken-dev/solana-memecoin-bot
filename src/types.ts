@@ -152,6 +152,12 @@ export interface BotConfig {
    * default (0 = off). Optional so older fixtures compile.
    */
   earlyExit?: EarlyExitParams;
+  /** Entry price sanity check vs a fresh on-chain read (Oct 11 Nike). Optional so older fixtures compile. */
+  entryPriceCheck?: EntryPriceCheckParams;
+  /** Per-coin re-entry cooldown after any exit (persisted). Optional so older fixtures compile. */
+  reentryCooldown?: ReentryCooldownParams;
+  /** Price-history tape for the memory feature (JSONL per day). Optional so older fixtures compile. */
+  priceTape?: PriceTapeParams;
   /**
    * Resolved trading mode. Absent / "paper" = today's behaviour.
    * Set by loadConfig from the live gates (see src/live/mode.ts).
@@ -194,6 +200,38 @@ export interface EntryGuardParams {
   pullbackWindowSec: number;
   /** Skip after this many lower scan prices in a row ("red candles"). ENTRY_MAX_DOWN_TICKS. */
   maxDownTicks: number;
+}
+
+/** Entry price sanity check (src/risk/entryPriceCheck.ts). */
+export interface EntryPriceCheckParams {
+  /** ENTRY_PRICE_CHECK (default true). */
+  enabled: boolean;
+  /** Skip when quote and on-chain differ by more than this %. ENTRY_PRICE_MAX_GAP_PCT (default 25). */
+  maxGapPct: number;
+  /** After a mismatch / failed read, skip the coin this long. ENTRY_PRICE_MISMATCH_SKIP_MINUTES (default 10). */
+  mismatchSkipMinutes: number;
+  /** Paper + dry-run: fill at the on-chain price, not the scan quote. PAPER_FILL_AT_ONCHAIN (default true). */
+  fillAtOnchain: boolean;
+}
+
+/** Re-entry cooldown (src/risk/reentryCooldown.ts). 0 = off. */
+export interface ReentryCooldownParams {
+  /** After any exit. REENTRY_COOLDOWN_MINUTES (default 30). */
+  minutes: number;
+  /** After a stop-loss / early exit / any losing exit. REENTRY_COOLDOWN_AFTER_LOSS_MINUTES (default 120). */
+  afterLossMinutes: number;
+}
+
+/** Price tape (src/journal/priceTape.ts). */
+export interface PriceTapeParams {
+  /** PRICE_TAPE (default true). */
+  enabled: boolean;
+  /** Keep reading this long after an exit. PRICE_TAPE_POST_EXIT_SECONDS (default 180, 0 = off). */
+  postExitSeconds: number;
+  /** PRICE_TAPE_POST_EXIT_INTERVAL_MS (default 5000). */
+  postExitIntervalMs: number;
+  /** Fetch ~10 min of 1m candles from GeckoTerminal at entry (async). PRICE_TAPE_PRE_CANDLES (default true). */
+  preCandles: boolean;
 }
 
 /** Early-warning exits (0 = off). See src/strategy/earlyExit.ts. */
@@ -377,6 +415,8 @@ export type EntryRejectReason =
   | "no_volume_spike"
   /** Entry guard (src/strategy/entryGuard.ts). */
   | "run_too_far"
+  | "price_mismatch"
+  | "reentry_cooldown"
   | "brand_new"
   | "fading";
 

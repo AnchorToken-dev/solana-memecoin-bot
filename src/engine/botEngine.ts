@@ -66,6 +66,9 @@ import {
   evaluateEarlyExit,
 } from "../strategy/earlyExit.js";
 import { exitFillWarning } from "../strategy/exitFill.js";
+import { checkEntryPrice } from "../risk/entryPriceCheck.js";
+import { ReentryCooldownStore, reentryMinutesFor } from "../risk/reentryCooldown.js";
+import { PriceTape, fetchGeckoCandles } from "../journal/priceTape.js";
 import {
   ReadOnlySolanaWs,
   emptySolanaWsStatus,
@@ -332,7 +335,15 @@ export class BotEngine {
   /** On-chain mark reader for held coins (null = Dex/pump marks only). */
   private readonly onchainPrice: OnchainPriceReader | null;
   /** Last on-chain read per mint (reused by the slower full tick). */
-  private readonly onchainMarks = new Map<string, { usd: number; at: number; venue: OnchainVenue }>();
+  private readonly onchainMarks = new Map<string, { usd: number; at: number; venue: OnchainVenue; quoteReserveSol?: number }>();
+  /** Separate reader for pre-buy price checks + post-exit tape (never shares held-coin state). */
+  private readonly probePrice: OnchainPriceReader | null;
+  /** Per-coin re-entry cooldown (persisted in the mode's ledger dir). */
+  private readonly reentry: ReentryCooldownStore;
+  /** Price tape (JSONL per day) for the memory feature. */
+  private readonly priceTape: PriceTape;
+  private noProbeWarned = false;
+  private readonly reentryLogged = new Set<string>();
   /** Entry guard: prices seen per mint across scans. */
   private readonly scanPrices = new ScanPriceHistory();
   /** Early-warning exits: recent marks per open position. */
@@ -377,6 +388,10 @@ export class BotEngine {
        * null = off (Dex/pump marks only).
        */
       onchainPrice?: OnchainPriceReader | null;
+      /** Reader for entry price checks / post-exit tape. Defaults to `onchainPrice` when injected. */
+      probePrice?: OnchainPriceReader | null;
+      /** Price tape for tests. */
+      priceTape?: PriceTape;
       /** Live broker for tests. Ignored in paper mode. */
       liveBroker?: LiveBroker | null;
       /** Hard daily loss store (tests inject a clock). */
@@ -419,6 +434,25 @@ export class BotEngine {
     } else {
       this.onchainPrice = null;
     }
+    if (deps?.probePrice !== undefined) {
+      this.probePrice = deps.probePrice;
+    } else if (deps?.onchainPrice !== undefined) {
+      this.probePrice = deps.onchainPrice;
+    } else {
+      const rpc = ReadOnlySolanaRpc.fromEnv();
+      this.probePrice = rpc ? new OnchainPriceReader(rpc) : null;
+    }
+    this.reentry = new ReentryCooldownStore(this.ledger.directory);
+    this.priceTape =
+      deps?.priceTape ??
+      new PriceTape(
+        this.ledger.directory,
+        cfg.priceTape ?? { enabled: false, postExitSeconds: 0, postExitIntervalMs: 5_000, preCandles: false },
+        {
+          readOnchain: (mint) => this.probeOnchainUsd(mint).then((r) => (r.ok ? r : null)),
+          fetchCandles: cfg.marketDataSource === "mock" ? null : (m, b, l) => fetchGeckoCandles(m, b, l),
+        },
+      );
     if (deps?.solanaWs !== undefined) {
       this.solanaWs = deps.solanaWs;
     } else if (this.cfg.solanaRpcWssConfigured === true) {
@@ -1066,6 +1100,7 @@ export class BotEngine {
       });
       const warn = this.tagExitFill(pos, fill, markPrice, reason, realizedPnlUsd);
       this.ledger.recordSell(fill, realizedPnlUsd, proceedsUsd);
+      this.afterClose(pos, fill, reason, realizedPnlUsd, markPrice, warn);
       await this.recordJournalClose(pos, fill, realizedPnlUsd, warn ?? undefined);
       return fill;
     }
@@ -1082,11 +1117,77 @@ export class BotEngine {
     this.sellFailAlerted.delete(pos.id);
     const warn = this.tagExitFill(pos, res.fill, markPrice, reason, res.realizedPnlUsd);
     this.ledger.recordSell(res.fill, res.realizedPnlUsd, res.proceedsUsd);
+    this.afterClose(pos, res.fill, reason, res.realizedPnlUsd, markPrice, warn);
     const parts = [...(warn ? [warn] : []), ...res.notes];
     const note = parts.length > 0 ? redactSecrets(parts.join(" | ")).slice(0, 400) : undefined;
     await this.recordJournalClose(pos, res.fill, res.realizedPnlUsd, note);
     void this.refreshLiveBalance();
     return res.fill;
+  }
+
+  /** Re-entry cooldown + price tape after any successful close. Never throws. */
+  private afterClose(
+    pos: Position,
+    fill: Fill,
+    reason: import("../types.js").ExitReason,
+    realizedPnlUsd: number,
+    markPrice: number,
+    warn: string | null,
+  ): void {
+    try {
+      const rc = this.cfg.reentryCooldown;
+      if (rc) {
+        const mins = reentryMinutesFor(reason, realizedPnlUsd, rc);
+        const b = this.reentry.block(pos.mint, pos.symbol, mins, `after ${reason} (${realizedPnlUsd >= 0 ? "+" : ""}$${realizedPnlUsd.toFixed(2)})`);
+        if (b) {
+          this.reentryLogged.delete(pos.mint);
+          log.info(`Re-entry cooldown ${pos.symbol}: no new buy for ${mins} min (until ${new Date(b.until).toISOString()})`);
+        }
+      }
+      this.priceTape.recordExit({
+        tradeId: pos.id,
+        at: fill.timestamp ?? Date.now(),
+        reason,
+        fillPrice: fill.price,
+        decisionMarkPrice: markPrice,
+        realizedPnlUsd,
+        exitWarning: warn,
+      });
+    } catch (err) {
+      log.warn("afterClose bookkeeping failed (trade itself is recorded)", err);
+    }
+  }
+
+  /**
+   * Fresh on-chain USD price for any mint (not just held ones), via the probe
+   * reader. Drops the reader's cached source so the next probe re-resolves
+   * (catches a coin that graduated in between).
+   */
+  private async probeOnchainUsd(
+    mint: string,
+  ): Promise<{ ok: true; priceUsd: number; quoteReserveSol?: number; venue: OnchainVenue; market?: string } | { ok: false; error: string }> {
+    const reader = this.probePrice;
+    if (!reader) return { ok: false, error: "no Solana RPC configured" };
+    let m;
+    try {
+      m = await reader.read(mint);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message.slice(0, 120) : "read threw" };
+    } finally {
+      reader.drop(mint);
+    }
+    if (!m) return { ok: false, error: "no pump.fun curve / SOL PumpSwap pool readable" };
+    const solUsd = await this.resolveQuoteUsdRate();
+    if (solUsd == null || !(solUsd > 0)) return { ok: false, error: "no SOL/USD rate" };
+    const usd = m.priceSol * solUsd;
+    if (!Number.isFinite(usd) || !(usd > 0)) return { ok: false, error: "bad on-chain price" };
+    return {
+      ok: true,
+      priceUsd: usd,
+      venue: m.venue,
+      ...(m.quoteReserveSol != null ? { quoteReserveSol: m.quoteReserveSol } : {}),
+      ...(m.market ? { market: m.market } : {}),
+    };
   }
 
   /** Stamp the decision mark on a sell fill and flag label/fill mismatches. */
@@ -2152,7 +2253,12 @@ export class BotEngine {
     if (solUsd == null || !(solUsd > 0)) return null;
     const usd = m.priceSol * solUsd;
     if (!Number.isFinite(usd) || !(usd > 0)) return null;
-    this.onchainMarks.set(pos.mint, { usd, at: Date.now(), venue: m.venue });
+    this.onchainMarks.set(pos.mint, {
+      usd,
+      at: Date.now(),
+      venue: m.venue,
+      ...(m.quoteReserveSol != null ? { quoteReserveSol: m.quoteReserveSol } : {}),
+    });
     if (!this.markSourceLogged.has(pos.mint)) {
       this.markSourceLogged.add(pos.mint);
       log.info(
@@ -2160,6 +2266,13 @@ export class BotEngine {
       );
     }
     return usd;
+  }
+
+  /** Price tape: every mark while holding (memory only until exit). */
+  private tapeMark(pos: Position, mark: number, nowMs: number): void {
+    const oc = this.onchainMarks.get(pos.mint);
+    const fromChain = oc != null && oc.usd === mark;
+    this.priceTape.recordMark(pos.id, nowMs, mark, fromChain ? "chain" : "quote", fromChain ? oc.quoteReserveSol : undefined);
   }
 
   /**
@@ -2197,6 +2310,7 @@ export class BotEngine {
       if (!cur) continue;
       this.lastMarks.set(cur.mint, mark);
       const nowFast = Date.now();
+      this.tapeMark(cur, mark, nowFast);
       const { position: updated, exit: baseExit } = evaluateExit(cur, mark, this.cfg, nowFast);
       this.ledger.replacePosition(updated);
       const exit = baseExit ?? this.earlyExitSignal(updated, mark, nowFast);
@@ -2413,6 +2527,7 @@ export class BotEngine {
         continue;
       }
       this.lastMarks.set(pos.mint, mark);
+      this.tapeMark(pos, mark, now);
       const { position: updated, exit: baseExit } = evaluateExit(pos, mark, cfg, now);
       ledger.replacePosition(updated);
       const exit = baseExit ?? this.earlyExitSignal(updated, mark, now);
@@ -2522,6 +2637,16 @@ export class BotEngine {
         return false;
       });
     }
+    // Per-coin re-entry cooldown (after any exit / a price mismatch). Persisted.
+    usable = usable.filter((e) => {
+      const b = this.reentry.get(e.mint, now);
+      if (!b) return true;
+      if (!this.reentryLogged.has(e.mint)) {
+        this.reentryLogged.add(e.mint);
+        log.info(`Skip entry ${e.symbol}: reentry_cooldown (${b.reason}; until ${new Date(b.until).toISOString()})`);
+      }
+      return false;
+    });
     const guard = cfg.entryGuard ?? DEFAULT_ENTRY_GUARD;
     if (entryGuardActive(guard)) {
       usable = usable.filter((e) => {
@@ -2571,6 +2696,7 @@ export class BotEngine {
       return false;
     }
 
+    let rugForTape: unknown = null;
     if (cfg.rugFilterEnabled === true || this.isLiveMode()) {
       if (!this.rugVerdicts) {
         const mins =
@@ -2624,6 +2750,7 @@ export class BotEngine {
         return false;
       }
       this.rugVerdicts.record(entry.mint, decision, Date.now());
+      rugForTape = { allow: decision.allow, reason: decision.reason, skipped: decision.skipped, metrics: decision.metrics ?? null };
       if (decision.skipped.length > 0) {
         log.info(
           `Rug filter skipped checks for ${entry.symbol}: ${decision.skipped.join(", ")}`,
@@ -2636,6 +2763,44 @@ export class BotEngine {
         return false;
       }
     }
+
+    // Entry price sanity check (Oct 11 Nike: stale DexScreener quote 50x above
+    // the pool after a rug). Fresh on-chain read right before the buy.
+    let onchainEntryUsd: number | null = null;
+    let quoteVsOnchainPct: number | null = null;
+    let entryMarket: string | null = null;
+    const epc = cfg.entryPriceCheck;
+    if (epc?.enabled) {
+      const probe = await this.probeOnchainUsd(entry.mint);
+      if (!probe.ok && !this.isLiveMode() && !this.probePrice) {
+        // Paper without any RPC configured: can't check; say so once.
+        if (!this.noProbeWarned) {
+          this.noProbeWarned = true;
+          log.warn("Entry price check: no Solana RPC configured — paper buys use the scan quote unchecked");
+        }
+      } else {
+        const v = checkEntryPrice({
+          quoteUsd: entry.priceUsd,
+          onchainUsd: probe.ok ? probe.priceUsd : null,
+          params: epc,
+          ...(probe.ok ? {} : { readError: probe.error }),
+        });
+        if (!v.ok) {
+          const b = this.reentry.block(entry.mint, entry.symbol, epc.mismatchSkipMinutes, "price_mismatch");
+          this.reentryLogged.add(entry.mint);
+          log.info(
+            `Skip entry ${entry.symbol}: price_mismatch (${v.detail})${b ? ` · skipping this coin for ${epc.mismatchSkipMinutes} min` : ""}`,
+          );
+          return false;
+        }
+        onchainEntryUsd = v.onchainUsd;
+        quoteVsOnchainPct = v.gapPct;
+        if (probe.ok) entryMarket = probe.market ?? null;
+      }
+    }
+    // Paper / dry-run fill at the fresh on-chain price (the scan quote can lag).
+    const entryMark =
+      onchainEntryUsd != null && epc?.fillAtOnchain !== false ? onchainEntryUsd : entry.priceUsd;
 
     let fill: Fill;
     let position: Position;
@@ -2650,7 +2815,7 @@ export class BotEngine {
       const res = await this.liveBroker.buy({
         mint: entry.mint,
         symbol: entry.symbol,
-        markPrice: entry.priceUsd,
+        markPrice: entryMark,
         // Exact size; LiveBroker refuses (never shrinks) above LIVE_MAX_POSITION_USD or when the wallet is short.
         notionalUsd: sized.notionalUsd,
         solUsd,
@@ -2702,7 +2867,7 @@ export class BotEngine {
       ({ fill, position } = broker.applyBuy({
         mint: entry.mint,
         symbol: entry.symbol,
-        markPrice: entry.priceUsd,
+        markPrice: entryMark,
         notionalUsd: sized.notionalUsd,
         // Realistic paper costs: SOL-priced fees, venue fee tier, size-aware slippage.
         solUsd: await this.resolveQuoteUsdRate(),
@@ -2712,7 +2877,31 @@ export class BotEngine {
       position = { ...position, tradeSizeUsd: tradeSize.selectedUsd, mode: "paper" };
     }
     ledger.recordBuy(fill, position);
-    log.info(`Entry signal: ${entry.reason}`);
+    log.info(
+      `Entry signal: ${entry.reason}${onchainEntryUsd != null ? ` · quote vs on-chain ${quoteVsOnchainPct! >= 0 ? "+" : ""}${quoteVsOnchainPct!.toFixed(1)}%` : ""}`,
+    );
+    try {
+      const snapForTape = snaps.find((s) => s.mint === entry.mint);
+      this.priceTape.recordEntry({
+        tradeId: position.id,
+        mint: position.mint,
+        symbol: position.symbol,
+        mode: this.tradingMode,
+        at: fill.timestamp ?? Date.now(),
+        fillPrice: fill.price,
+        quotePrice: entry.priceUsd,
+        onchainPrice: onchainEntryUsd,
+        quoteVsOnchainPct,
+        market: entryMarket,
+        notionalUsd: fill.notionalUsd,
+        entryReason: entry.reason,
+        ...(snapForTape ? { snapshot: snapForTape } : {}),
+        scanPrices: this.scanPrices.get(entry.mint),
+        rug: rugForTape,
+      });
+    } catch (err) {
+      log.warn("price tape entry failed", err);
+    }
     this.events.push(
       "position_opened",
       "Position opened",
