@@ -130,6 +130,28 @@ export function parseTokenAccountHolder(data: Uint8Array): string | null {
   return base58Encode(data.subarray(32, 64));
 }
 
+/** "Too many inputs provided; max 5" → 5. Null when the error is something else. */
+export function parseMaxInputs(error: string | undefined): number | null {
+  if (!error) return null;
+  const m = /too many inputs provided;?\s*max\s*(\d+)/i.exec(error);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isInteger(n) && n >= 1 ? n : null;
+}
+
+/** Batch caps learned from provider errors, per endpoint (process lifetime). */
+const LEARNED_MAX_MULTI = new Map<string, number>();
+
+/** Tests only. */
+export function resetLearnedRpcLimits(): void {
+  LEARNED_MAX_MULTI.clear();
+}
+
+function envMaxMulti(): number {
+  const raw = Number(process.env.SOLANA_RPC_MAX_MULTI_ACCOUNTS);
+  return Number.isInteger(raw) && raw >= 1 && raw <= 100 ? raw : 100;
+}
+
 export class ReadOnlySolanaRpc {
   constructor(
     private readonly endpoint: string,
@@ -161,9 +183,29 @@ export class ReadOnlySolanaRpc {
   }
 
   /**
-   * Up to 100 accounts in one request (same order as `pubkeys`; null = no
-   * account). One HTTP call instead of N — keeps rug checks and exit price
-   * polls inside provider rate limits.
+   * Largest batch this RPC accepts for getMultipleAccounts. Starts at
+   * SOLANA_RPC_MAX_MULTI_ACCOUNTS (default 100, the Solana spec) and drops
+   * automatically when the provider answers "Too many inputs provided; max N"
+   * (rpcfast's free tier says max 5; on Oct 9 that one error failed the rug
+   * filter on 95 graduated-coin checks).
+   */
+  private get maxMulti(): number {
+    return LEARNED_MAX_MULTI.get(this.endpoint) ?? envMaxMulti();
+  }
+
+  private set maxMulti(n: number) {
+    // Remembered per endpoint: the engine builds a fresh client per rug check.
+    LEARNED_MAX_MULTI.set(this.endpoint, n);
+  }
+
+  /** Current batch size (tests / status). */
+  get multiAccountBatchSize(): number {
+    return this.maxMulti;
+  }
+
+  /**
+   * Accounts in request order (null = no account). Splits into batches the
+   * provider accepts, so callers can pass up to 100 keys on any plan.
    */
   async getMultipleAccounts(
     pubkeys: string[],
@@ -172,6 +214,30 @@ export class ReadOnlySolanaRpc {
     if (pubkeys.length > 100) {
       return { ok: false, error: "getMultipleAccounts: at most 100 accounts" };
     }
+    const out: (AccountInfo | null)[] = [];
+    let i = 0;
+    let shrinks = 0;
+    while (i < pubkeys.length) {
+      const chunk = pubkeys.slice(i, i + this.maxMulti);
+      const res = await this.getMultipleAccountsOnce(chunk);
+      if (!res.ok) {
+        const cap = parseMaxInputs(res.error);
+        if (cap != null && cap < chunk.length && shrinks < 3) {
+          this.maxMulti = cap;
+          shrinks++;
+          continue; // retry this chunk smaller; nothing consumed
+        }
+        return res;
+      }
+      out.push(...res.value);
+      i += chunk.length;
+    }
+    return { ok: true, value: out };
+  }
+
+  private async getMultipleAccountsOnce(
+    pubkeys: string[],
+  ): Promise<RpcResult<(AccountInfo | null)[]>> {
     const res = await this.rpc("getMultipleAccounts", [
       pubkeys,
       { encoding: "base64", commitment: "confirmed" },

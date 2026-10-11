@@ -7,7 +7,7 @@
  * update, atomically (write tmp → fsync → rename), and restores it on boot.
  *
  *   paper         → <ledgerDir>/open-positions.paper.json
- *   live_dry_run  → <ledgerDir>/live/open-positions.dry-run.json
+ *   live_dry_run  → <ledgerDir>/live-dry-run/open-positions.dry-run.json
  *   live          → <ledgerDir>/live/open-positions.json
  *
  * No secrets: mint, symbol, qty, prices, fees, signature, timestamps only.
