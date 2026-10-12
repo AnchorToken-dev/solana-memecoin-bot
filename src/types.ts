@@ -158,6 +158,12 @@ export interface BotConfig {
   reentryCooldown?: ReentryCooldownParams;
   /** Price-history tape for the memory feature (JSONL per day). Optional so older fixtures compile. */
   priceTape?: PriceTapeParams;
+  /** Follow skipped coins on-chain for a few minutes (src/journal/shadowTape.ts). */
+  shadowTape?: import("./journal/shadowTape.js").ShadowTapeParams;
+  /** Skip when similar trades' typical move < round-trip costs (src/strategy/costGate.ts). Default off. */
+  costGate?: import("./strategy/costGate.js").CostGateParams;
+  /** Paper only: also price every trade at this size, log to size-compare.jsonl (0 = off). */
+  sizeCompareUsd?: number;
   /** Trailing take-profit never sells below break-even (Oct 12 review). Optional so older fixtures compile. */
   trailBreakeven?: TrailBreakevenParams;
   /** Entry memory score (src/strategy/memory.ts). Optional so older fixtures compile. */

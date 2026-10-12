@@ -48,6 +48,8 @@ export interface MemoryTrade {
   f: MemoryFeatures;
   /** Realized P&L as % of trade size (fees included). */
   pnlPct: number;
+  /** Best mark while held vs the entry fill, % (cost gate). Older trades lack it. */
+  mfePct?: number;
 }
 
 export interface MemoryVerdict {
@@ -100,13 +102,8 @@ function stdev(xs: number[]): number {
   return Math.sqrt(v) || 1;
 }
 
-/** Pure scorer (used by the store and the replay test). */
-export function scoreAgainst(history: readonly MemoryTrade[], f: MemoryFeatures, p: MemoryParams): MemoryVerdict {
-  const n = history.length;
-  if (!p.enabled) return { skip: false, n, k: 0, avgPnlPct: null, winRatePct: null, detail: "memory off" };
-  if (n < p.minTrades) {
-    return { skip: false, n, k: 0, avgPnlPct: null, winRatePct: null, detail: `learning (${n}/${p.minTrades} trades remembered)` };
-  }
+/** The k past trades most like f (standardised distance, ≥3 shared features; ties → newer). */
+export function nearest(history: readonly MemoryTrade[], f: MemoryFeatures, count: number): MemoryTrade[] {
   const sd = new Map<keyof MemoryFeatures, number>();
   for (const k of KEYS) {
     const xs = history.map((h) => tx(k, h.f[k])).filter((v): v is number => v != null);
@@ -128,7 +125,17 @@ export function scoreAgainst(history: readonly MemoryTrade[], f: MemoryFeatures,
   }
   // Equal distance: prefer the newer trade (review Oct 12).
   ds.sort((a, b) => a.d - b.d || b.i - a.i);
-  const nb = ds.slice(0, p.neighbors).map((x) => x.h);
+  return ds.slice(0, count).map((x) => x.h);
+}
+
+/** Pure scorer (used by the store and the replay test). */
+export function scoreAgainst(history: readonly MemoryTrade[], f: MemoryFeatures, p: MemoryParams): MemoryVerdict {
+  const n = history.length;
+  if (!p.enabled) return { skip: false, n, k: 0, avgPnlPct: null, winRatePct: null, detail: "memory off" };
+  if (n < p.minTrades) {
+    return { skip: false, n, k: 0, avgPnlPct: null, winRatePct: null, detail: `learning (${n}/${p.minTrades} trades remembered)` };
+  }
+  const nb = nearest(history, f, p.neighbors);
   if (nb.length < Math.min(p.neighbors, 5)) {
     return { skip: false, n, k: nb.length, avgPnlPct: null, winRatePct: null, detail: "not enough comparable trades" };
   }
@@ -162,6 +169,10 @@ export class TradeMemory {
     this.load();
   }
 
+  get history(): readonly MemoryTrade[] {
+    return this.trades;
+  }
+
   get size(): number {
     return this.trades.length;
   }
@@ -182,6 +193,7 @@ export class TradeMemory {
         for (const [id, e] of Object.entries(raw.pending ?? {})) {
           if (e && e.f && Number.isFinite(e.at) && now - e.at < PENDING_MAX_AGE_MS) this.pending.set(id, e);
         }
+        this.backfillMfe();
         return;
       } catch {
         // Unreadable: keep the bad file instead of overwriting it on the next save.
@@ -197,6 +209,28 @@ export class TradeMemory {
     // First start in this mode: learn from the price tape already on disk.
     this.trades = seedFromTape(join(this.dir, "price-tape"));
     if (this.trades.length > 0) this.save();
+  }
+
+  /** Trades remembered before mfePct existed: fill it in from the tape (once). */
+  private backfillMfe(): void {
+    if (!this.trades.some((t) => t.mfePct == null)) return;
+    let seeded: MemoryTrade[];
+    try {
+      seeded = seedFromTape(join(this.dir, "price-tape"));
+    } catch {
+      return;
+    }
+    const by = new Map(seeded.filter((t) => t.mfePct != null).map((t) => [`${t.at}|${t.symbol}`, t.mfePct!]));
+    let n = 0;
+    for (const t of this.trades) {
+      if (t.mfePct != null) continue;
+      const m = by.get(`${t.at}|${t.symbol}`);
+      if (m != null) {
+        t.mfePct = m;
+        n++;
+      }
+    }
+    if (n > 0) this.save();
   }
 
   private save(): void {
@@ -218,7 +252,7 @@ export class TradeMemory {
   }
 
   /** When a position closes. False when its entry features were never recorded. */
-  recordClose(id: string, c: { symbol: string; openedAt: number; pnlPct: number }): boolean {
+  recordClose(id: string, c: { symbol: string; openedAt: number; pnlPct: number; mfePct?: number; closedAt?: number }): boolean {
     const e = this.pending.get(id);
     if (!e) return false;
     this.pending.delete(id);
@@ -226,7 +260,14 @@ export class TradeMemory {
       this.save();
       return false;
     }
-    this.add({ at: c.openedAt, symbol: c.symbol, f: e.f, pnlPct: c.pnlPct });
+    this.add({
+      at: c.openedAt,
+      ...(c.closedAt != null ? { closedAt: c.closedAt } : {}),
+      symbol: c.symbol,
+      f: e.f,
+      pnlPct: c.pnlPct,
+      ...(c.mfePct != null && Number.isFinite(c.mfePct) ? { mfePct: c.mfePct } : {}),
+    });
     return true;
   }
 
@@ -280,6 +321,7 @@ export function seedFromTape(tapeDir: string): MemoryTrade[] {
           ...(num(d.at) != null ? { closedAt: num(d.at)! } : {}),
           symbol: String(e.symbol ?? ""),
           pnlPct: (pnl / notional) * 100,
+          ...tapeMfe(num(e.fillPrice), marks),
           f: {
             runupPct: num(e.runupPct),
             volSharePct: num(e.windowVolumeSharePct),
@@ -295,4 +337,16 @@ export function seedFromTape(tapeDir: string): MemoryTrade[] {
     }
   }
   return out.sort((a, b) => a.at - b.at);
+}
+
+function tapeMfe(fill: number | null, marks: unknown[][]): { mfePct?: number } {
+  if (!fill || fill <= 0) return {};
+  let hi = -Infinity;
+  for (const m of marks) if (Array.isArray(m) && typeof m[1] === "number" && Number.isFinite(m[1])) hi = Math.max(hi, m[1]);
+  return Number.isFinite(hi) ? { mfePct: (hi / fill - 1) * 100 } : {};
+}
+
+/** Read-only view for the cost gate. */
+export function memoryTrades(m: TradeMemory): readonly MemoryTrade[] {
+  return m.history;
 }
