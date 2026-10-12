@@ -38,3 +38,14 @@ mobile/android/captures/
 # Oct 11: per-mode re-entry cooldowns + price tape (memory feature)
 data/**/reentry-cooldowns.json
 data/**/price-tape/
+
+# v2: more local trading data that should never be committed
+data/**/memory.json
+data/**/memory.json.corrupt-*
+data/**/open-positions*.json
+data/live/
+data/live-dry-run/
+data/**/trades.json
+data/**/trades.csv
+data/**/vault.json
+data/**/reentry-cooldowns.json

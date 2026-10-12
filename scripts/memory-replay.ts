@@ -1,7 +1,7 @@
 /**
  * Walk-forward replay of the entry memory on a price-tape folder:
  *   npx tsx scripts/memory-replay.ts data/price-tape
- * Each trade is scored only against trades that closed before it. Optimistic:
+ * Each trade is scored only against trades that had closed before it was entered. Optimistic:
  * a skipped coin's slot might have gone to another (unknown) trade.
  */
 import { DEFAULT_MEMORY, scoreAgainst, seedFromTape } from "../src/strategy/memory.js";
@@ -12,7 +12,9 @@ const p = { ...DEFAULT_MEMORY };
 let skipped = 0, skippedPct = 0, skippedWins = 0, skippedCrash = 0, evaluated = 0, evalPct = 0;
 for (let i = 0; i < all.length; i++) {
   const t = all[i]!;
-  const v = scoreAgainst(all.slice(0, i), t.f, p);
+  // Only trades already CLOSED when this one was entered (review Oct 12).
+  const known = all.slice(0, i).filter((h) => (h.closedAt ?? h.at) <= t.at);
+  const v = scoreAgainst(known, t.f, p);
   if (i >= p.minTrades) { evaluated++; evalPct += t.pnlPct; }
   if (v.skip) {
     skipped++; skippedPct += t.pnlPct;
