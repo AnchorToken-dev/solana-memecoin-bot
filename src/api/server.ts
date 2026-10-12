@@ -10,6 +10,7 @@ import express from "express";
 import cors from "cors";
 import type { BotEngine } from "../engine/botEngine.js";
 import { log } from "../logging.js";
+import { apiTokenGuard } from "./auth.js";
 
 export interface ApiOptions {
   host?: string;
@@ -26,6 +27,8 @@ export function createControlApp(engine: BotEngine) {
     }),
   );
   app.use(express.json({ limit: "64kb" }));
+  const apiToken = process.env.API_TOKEN?.trim();
+  if (apiToken) app.use(apiTokenGuard(apiToken));
 
   app.get("/health", (_req, res) => {
     res.json({
@@ -541,6 +544,11 @@ export async function startControlApi(
   return new Promise((resolve, reject) => {
     const server = app.listen(port, host, () => {
       log.info(`Control API listening on http://${host}:${port}`);
+      if (!process.env.API_TOKEN?.trim() && host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
+        log.warn(
+          `Control API is open to your network (host ${host}) with no API_TOKEN. Anyone who can reach port ${port} can start/stop the bot, sell positions and change config. Set API_TOKEN, or API_HOST=127.0.0.1.`,
+        );
+      }
       resolve({
         host,
         port,

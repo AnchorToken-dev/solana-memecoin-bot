@@ -225,7 +225,7 @@ describe("crash mid-position (LIVE DRY-RUN engine)", () => {
       const before = e1.ledger.openPositions[0]!;
       const cashAtCrash = e1.ledger.cash;
       assert.ok(Math.abs(cashAtCrash - 185) < 1e-9);
-      const path = join(ld, "live", positionsFileName("live_dry_run"));
+      const path = join(ld, "live-dry-run", positionsFileName("live_dry_run")); // dry-run has its own ledger dir (liveLedgerDir)
       const snapshotAtCrash = readFileSync(path, "utf8"); // what's on disk when the process dies
       market.signal = null;
       await e1.stop();

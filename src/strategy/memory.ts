@@ -16,8 +16,9 @@
  * Persisted per mode at <mode ledger dir>/memory.json. Seeded from that
  * mode's price tape on first start; updated after every closed trade.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync, readdirSync, renameSync } from "node:fs";
+import { join } from "node:path";
+import { writeFileAtomic } from "../ledger/positionStore.js";
 import type { MemoryParams, TokenSnapshot } from "../types.js";
 
 export const DEFAULT_MEMORY: MemoryParams = {
@@ -39,7 +40,10 @@ export interface MemoryFeatures {
 }
 
 export interface MemoryTrade {
+  /** Entry time (ms). */
   at: number;
+  /** Close time (ms), when known. */
+  closedAt?: number;
   symbol: string;
   f: MemoryFeatures;
   /** Realized P&L as % of trade size (fees included). */
@@ -108,8 +112,9 @@ export function scoreAgainst(history: readonly MemoryTrade[], f: MemoryFeatures,
     const xs = history.map((h) => tx(k, h.f[k])).filter((v): v is number => v != null);
     sd.set(k, stdev(xs));
   }
-  const ds: { d: number; h: MemoryTrade }[] = [];
-  for (const h of history) {
+  const ds: { d: number; h: MemoryTrade; i: number }[] = [];
+  for (let i = 0; i < history.length; i++) {
+    const h = history[i]!;
     let s = 0;
     let used = 0;
     for (const k of KEYS) {
@@ -119,9 +124,10 @@ export function scoreAgainst(history: readonly MemoryTrade[], f: MemoryFeatures,
       s += ((a - b) / sd.get(k)!) ** 2;
       used++;
     }
-    if (used >= 3) ds.push({ d: Math.sqrt(s / used), h });
+    if (used >= 3) ds.push({ d: Math.sqrt(s / used), h, i });
   }
-  ds.sort((a, b) => a.d - b.d);
+  // Equal distance: prefer the newer trade (review Oct 12).
+  ds.sort((a, b) => a.d - b.d || b.i - a.i);
   const nb = ds.slice(0, p.neighbors).map((x) => x.h);
   if (nb.length < Math.min(p.neighbors, 5)) {
     return { skip: false, n, k: nb.length, avgPnlPct: null, winRatePct: null, detail: "not enough comparable trades" };
@@ -139,9 +145,14 @@ export function scoreAgainst(history: readonly MemoryTrade[], f: MemoryFeatures,
   };
 }
 
+/** Open entries older than this are dropped on load. */
+const PENDING_MAX_AGE_MS = 7 * 24 * 3_600_000;
+
 export class TradeMemory {
   readonly filePath: string;
   private trades: MemoryTrade[] = [];
+  /** Entry features of positions still open (persisted so a restart doesn't lose them). */
+  private pending = new Map<string, { f: MemoryFeatures; at: number }>();
 
   constructor(
     private readonly dir: string,
@@ -155,15 +166,33 @@ export class TradeMemory {
     return this.trades.length;
   }
 
+  get openCount(): number {
+    return this.pending.size;
+  }
+
   private load(): void {
-    try {
-      if (existsSync(this.filePath)) {
-        const raw = JSON.parse(readFileSync(this.filePath, "utf8")) as { trades?: MemoryTrade[] };
+    if (existsSync(this.filePath)) {
+      try {
+        const raw = JSON.parse(readFileSync(this.filePath, "utf8")) as {
+          trades?: MemoryTrade[];
+          pending?: Record<string, { f: MemoryFeatures; at: number }>;
+        };
         this.trades = (raw.trades ?? []).filter((t) => t && t.f && Number.isFinite(t.pnlPct));
+        const now = Date.now();
+        for (const [id, e] of Object.entries(raw.pending ?? {})) {
+          if (e && e.f && Number.isFinite(e.at) && now - e.at < PENDING_MAX_AGE_MS) this.pending.set(id, e);
+        }
         return;
+      } catch {
+        // Unreadable: keep the bad file instead of overwriting it on the next save.
+        try {
+          renameSync(this.filePath, `${this.filePath}.corrupt-${Date.now()}`);
+        } catch {
+          // best effort
+        }
+        this.trades = [];
+        this.pending = new Map();
       }
-    } catch {
-      this.trades = [];
     }
     // First start in this mode: learn from the price tape already on disk.
     this.trades = seedFromTape(join(this.dir, "price-tape"));
@@ -172,10 +201,7 @@ export class TradeMemory {
 
   private save(): void {
     try {
-      mkdirSync(dirname(this.filePath), { recursive: true });
-      const tmp = `${this.filePath}.tmp`;
-      writeFileSync(tmp, JSON.stringify({ v: 1, trades: this.trades }));
-      renameSync(tmp, this.filePath);
+      writeFileAtomic(this.filePath, JSON.stringify({ v: 2, trades: this.trades, pending: Object.fromEntries(this.pending) }));
     } catch {
       // best effort
     }
@@ -183,6 +209,25 @@ export class TradeMemory {
 
   score(f: MemoryFeatures): MemoryVerdict {
     return scoreAgainst(this.trades, f, this.p);
+  }
+
+  /** Right after a buy: remember the entry features until the position closes. */
+  noteEntry(id: string, f: MemoryFeatures, at: number = Date.now()): void {
+    this.pending.set(id, { f, at });
+    this.save();
+  }
+
+  /** When a position closes. False when its entry features were never recorded. */
+  recordClose(id: string, c: { symbol: string; openedAt: number; pnlPct: number }): boolean {
+    const e = this.pending.get(id);
+    if (!e) return false;
+    this.pending.delete(id);
+    if (!Number.isFinite(c.pnlPct)) {
+      this.save();
+      return false;
+    }
+    this.add({ at: c.openedAt, symbol: c.symbol, f: e.f, pnlPct: c.pnlPct });
+    return true;
   }
 
   add(t: MemoryTrade): void {
@@ -232,6 +277,7 @@ export function seedFromTape(tapeDir: string): MemoryTrade[] {
         const firstRes = marks.find((m) => Array.isArray(m) && m.length > 3)?.[3];
         out.push({
           at: num(e.at) ?? 0,
+          ...(num(d.at) != null ? { closedAt: num(d.at)! } : {}),
           symbol: String(e.symbol ?? ""),
           pnlPct: (pnl / notional) * 100,
           f: {

@@ -69,7 +69,7 @@ import { exitFillWarning } from "../strategy/exitFill.js";
 import { checkEntryPrice } from "../risk/entryPriceCheck.js";
 import { ReentryCooldownStore, reentryMinutesFor } from "../risk/reentryCooldown.js";
 import { PriceTape, fetchGeckoCandles } from "../journal/priceTape.js";
-import { TradeMemory, featuresFrom, type MemoryFeatures } from "../strategy/memory.js";
+import { TradeMemory, featuresFrom } from "../strategy/memory.js";
 import {
   ReadOnlySolanaWs,
   emptySolanaWsStatus,
@@ -346,7 +346,6 @@ export class BotEngine {
   private noProbeWarned = false;
   /** Entry memory score (per mode, persisted). Null when off. */
   private readonly memory: TradeMemory | null;
-  private readonly entryFeatures = new Map<string, MemoryFeatures>();
   private readonly reentryLogged = new Set<string>();
   /** Entry guard: prices seen per mint across scans. */
   private readonly scanPrices = new ScanPriceHistory();
@@ -1149,10 +1148,8 @@ export class BotEngine {
           log.info(`Re-entry cooldown ${pos.symbol}: no new buy for ${mins} min (until ${new Date(b.until).toISOString()})`);
         }
       }
-      const feats = this.entryFeatures.get(pos.id);
-      this.entryFeatures.delete(pos.id);
-      if (this.memory && feats && pos.entryNotionalUsd > 0) {
-        this.memory.add({ at: pos.openedAt, symbol: pos.symbol, f: feats, pnlPct: (realizedPnlUsd / pos.entryNotionalUsd) * 100 });
+      if (this.memory && pos.entryNotionalUsd > 0) {
+        this.memory.recordClose(pos.id, { symbol: pos.symbol, openedAt: pos.openedAt, pnlPct: (realizedPnlUsd / pos.entryNotionalUsd) * 100 });
       }
       this.priceTape.recordExit({
         tradeId: pos.id,
@@ -2906,7 +2903,7 @@ export class BotEngine {
       position = { ...position, tradeSizeUsd: tradeSize.selectedUsd, mode: "paper" };
     }
     ledger.recordBuy(fill, position);
-    this.entryFeatures.set(position.id, memFeatures);
+    this.memory?.noteEntry(position.id, memFeatures, position.openedAt);
     log.info(
       `Entry signal: ${entry.reason}${onchainEntryUsd != null ? ` · quote vs on-chain ${quoteVsOnchainPct! >= 0 ? "+" : ""}${quoteVsOnchainPct!.toFixed(1)}%` : ""}`,
     );
