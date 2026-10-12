@@ -107,6 +107,7 @@ const ConfigSchema = z.object({
       givebackArmPct: z.number().gte(0),
       givebackPct: z.number().gt(0).lte(100),
       stallSeconds: z.number().gte(0),
+      reserveDropPct: z.number().gte(0).lte(100).optional(),
     })
     .optional(),
   entryPriceCheck: z
@@ -121,6 +122,18 @@ const ConfigSchema = z.object({
     .object({
       minutes: z.number().gte(0),
       afterLossMinutes: z.number().gte(0),
+    })
+    .optional(),
+  trailBreakeven: z
+    .object({ enabled: z.boolean(), exitFeePct: z.number().gte(0).lte(50), minProfitPct: z.number().gte(0).lte(50) })
+    .optional(),
+  memory: z
+    .object({
+      enabled: z.boolean(),
+      minTrades: z.number().int().gte(1),
+      neighbors: z.number().int().gte(1),
+      skipAvgPnlPct: z.number(),
+      maxTrades: z.number().int().gte(10),
     })
     .optional(),
   priceTape: z
@@ -659,6 +672,7 @@ export function loadConfig(opts?: {
       givebackArmPct: envNum("EXIT_GIVEBACK_ARM_PCT", 0),
       givebackPct: envNum("EXIT_GIVEBACK_PCT", 50),
       stallSeconds: envNum("EXIT_STALL_SECONDS", 0),
+      reserveDropPct: envNum("EXIT_RESERVE_DROP_PCT", 5),
     },
     // Oct 11 Nike review: ON by default (safety, not strategy).
     entryPriceCheck: {
@@ -670,6 +684,19 @@ export function loadConfig(opts?: {
     reentryCooldown: {
       minutes: envNum("REENTRY_COOLDOWN_MINUTES", 30),
       afterLossMinutes: envNum("REENTRY_COOLDOWN_AFTER_LOSS_MINUTES", 120),
+    },
+    // Oct 12 memory review.
+    trailBreakeven: {
+      enabled: envBool("TRAIL_BREAKEVEN_FLOOR", true),
+      exitFeePct: envNum("TRAIL_EXIT_FEE_PCT", 2),
+      minProfitPct: envNum("TRAIL_MIN_PROFIT_PCT", 1),
+    },
+    memory: {
+      enabled: envBool("MEMORY_ENABLED", true),
+      minTrades: envNum("MEMORY_MIN_TRADES", 40),
+      neighbors: envNum("MEMORY_NEIGHBORS", 15),
+      skipAvgPnlPct: envNum("MEMORY_SKIP_AVG_PNL_PCT", -8),
+      maxTrades: envNum("MEMORY_MAX_TRADES", 2000),
     },
     priceTape: {
       enabled: envBool("PRICE_TAPE", true),

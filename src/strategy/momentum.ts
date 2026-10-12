@@ -211,9 +211,13 @@ export function evaluateExit(
 
   // Trailing take-profit once armed.
   if (updated.trailArmed) {
-    const trailFloor =
+    let trailFloor =
       updated.highWaterPrice *
       (1 - cfg.trailingTakeProfit.distancePct / 100);
+    // Oct 12: 21 of 27 trailing exits sold below break-even (arm +8%, trail 4%
+    // → sold ~+3%, round-trip costs ~5%). Floor the trail at break-even + a bit.
+    const be = breakevenPrice(updated, cfg.trailBreakeven);
+    if (be != null) trailFloor = Math.max(trailFloor, be);
     if (markPrice <= trailFloor) {
       return {
         position: updated,
@@ -227,4 +231,20 @@ export function evaluateExit(
   }
 
   return { position: updated, exit: null };
+}
+
+/**
+ * Price at which selling the whole position returns the money spent plus
+ * minProfitPct (entry fees/rent are already in entryNotional vs qty; exit
+ * costs estimated by exitFeePct). Null when off or unknown.
+ */
+export function breakevenPrice(
+  pos: Pick<Position, "qty" | "entryNotionalUsd">,
+  p: import("../types.js").TrailBreakevenParams | undefined,
+): number | null {
+  if (!p?.enabled || !(pos.qty > 0) || !(pos.entryNotionalUsd > 0)) return null;
+  const keep = 1 - p.exitFeePct / 100;
+  if (!(keep > 0)) return null;
+  const be = (pos.entryNotionalUsd / (pos.qty * keep)) * (1 + p.minProfitPct / 100);
+  return Number.isFinite(be) && be > 0 ? be : null;
 }

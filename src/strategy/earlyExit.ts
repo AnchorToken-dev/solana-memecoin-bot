@@ -21,11 +21,12 @@ export const DEFAULT_EARLY_EXIT: EarlyExitParams = {
   givebackArmPct: 0,
   givebackPct: 50,
   stallSeconds: 0,
+  reserveDropPct: 0,
 };
 
 export function earlyExitActive(p: EarlyExitParams | undefined): boolean {
   if (!p) return false;
-  return p.fastDropPct > 0 || p.redTicks > 0 || p.givebackArmPct > 0 || p.stallSeconds > 0;
+  return p.fastDropPct > 0 || p.redTicks > 0 || p.givebackArmPct > 0 || p.stallSeconds > 0 || (p.reserveDropPct ?? 0) > 0;
 }
 
 interface Mark {
@@ -38,8 +39,25 @@ export class PositionMarkHistory {
   private readonly marks = new Map<string, Mark[]>();
   private readonly lastHighAt = new Map<string, number>();
   private readonly peak = new Map<string, number>();
+  /** Last two SOL reserve reads per position: [previous, latest]. */
+  private readonly reserves = new Map<string, [number | null, number]>();
 
   constructor(private readonly keepMs = 120_000) {}
+
+  /** SOL reserve behind an on-chain read (pool quote / curve virtual SOL). */
+  recordReserve(positionId: string, sol: number): void {
+    if (!(sol > 0) || !Number.isFinite(sol)) return;
+    const cur = this.reserves.get(positionId);
+    if (cur && cur[1] === sol) return; // same read seen twice
+    this.reserves.set(positionId, [cur ? cur[1] : null, sol]);
+  }
+
+  /** % the reserve fell between the last two distinct reads (0 when it rose / unknown). */
+  reserveDropPct(positionId: string): number {
+    const r = this.reserves.get(positionId);
+    if (!r || r[0] == null || !(r[0] > 0)) return 0;
+    return Math.max(0, ((r[0] - r[1]) / r[0]) * 100);
+  }
 
   record(positionId: string, price: number, nowMs: number): void {
     if (!(price > 0) || !Number.isFinite(price)) return;
@@ -76,6 +94,7 @@ export class PositionMarkHistory {
         this.marks.delete(k);
         this.lastHighAt.delete(k);
         this.peak.delete(k);
+        this.reserves.delete(k);
       }
     }
   }
@@ -98,6 +117,16 @@ export function evaluateEarlyExit(
   nowMs: number,
 ): EarlyExitSignal | null {
   const marks = history.get(pos.id);
+
+  // Oct 12 tape: crashes are one-read events where the pool's SOL drops
+  // 5-10% at once (seller pulled it). Sell on that read instead of waiting.
+  const rd = p.reserveDropPct ?? 0;
+  if (rd > 0) {
+    const drop = history.reserveDropPct(pos.id);
+    if (drop >= rd) {
+      return { reason: "early_reserve_drop", detail: `pool SOL fell ${drop.toFixed(1)}% in one read (max ${rd}%) — someone pulled liquidity / dumped` };
+    }
+  }
 
   if (p.fastDropPct > 0 && marks.length >= 2) {
     const since = nowMs - p.fastDropWindowMs;

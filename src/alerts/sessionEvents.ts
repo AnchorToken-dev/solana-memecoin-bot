@@ -121,6 +121,8 @@ export function exitTitle(reason: string | undefined): string {
       return "Early exit: selling pressure";
     case "early_giveback":
       return "Early exit: gave back gains";
+    case "early_reserve_drop":
+      return "Early exit: pool SOL pulled";
     case "early_stall":
       return "Early exit: stalled below entry";
     default:

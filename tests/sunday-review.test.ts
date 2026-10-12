@@ -255,10 +255,12 @@ describe("engine wiring", () => {
   });
 
   it("config: env flags load, all off by default", () => {
-    const keys = ["ENTRY_MAX_RUNUP_PCT", "EXIT_FAST_DROP_PCT"];
+    const keys = ["ENTRY_MAX_RUNUP_PCT", "EXIT_FAST_DROP_PCT", "EXIT_RESERVE_DROP_PCT"];
     const saved = keys.map((k) => process.env[k]);
     try {
       for (const k of keys) delete process.env[k];
+      // Oct 12: the reserve-drop exit defaults ON (5%); the PR #34 rules stay off.
+      process.env.EXIT_RESERVE_DROP_PCT = "0";
       const off = loadConfig({ skipRuntimeOverlay: true } as never);
       assert.equal(entryGuardActive(off.entryGuard), false);
       assert.equal(earlyExitActive(off.earlyExit), false);

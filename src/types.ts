@@ -158,6 +158,10 @@ export interface BotConfig {
   reentryCooldown?: ReentryCooldownParams;
   /** Price-history tape for the memory feature (JSONL per day). Optional so older fixtures compile. */
   priceTape?: PriceTapeParams;
+  /** Trailing take-profit never sells below break-even (Oct 12 review). Optional so older fixtures compile. */
+  trailBreakeven?: TrailBreakevenParams;
+  /** Entry memory score (src/strategy/memory.ts). Optional so older fixtures compile. */
+  memory?: MemoryParams;
   /**
    * Resolved trading mode. Absent / "paper" = today's behaviour.
    * Set by loadConfig from the live gates (see src/live/mode.ts).
@@ -200,6 +204,30 @@ export interface EntryGuardParams {
   pullbackWindowSec: number;
   /** Skip after this many lower scan prices in a row ("red candles"). ENTRY_MAX_DOWN_TICKS. */
   maxDownTicks: number;
+}
+
+/** Trailing floor at break-even + a little (src/strategy/momentum.ts). */
+export interface TrailBreakevenParams {
+  /** TRAIL_BREAKEVEN_FLOOR (default true). */
+  enabled: boolean;
+  /** Estimated sell-side cost %, used for the break-even price. TRAIL_EXIT_FEE_PCT (default 2). */
+  exitFeePct: number;
+  /** Floor sits this % above break-even. TRAIL_MIN_PROFIT_PCT (default 1). */
+  minProfitPct: number;
+}
+
+/** Entry memory score (src/strategy/memory.ts). */
+export interface MemoryParams {
+  /** MEMORY_ENABLED (default true). */
+  enabled: boolean;
+  /** No skipping until this many closed trades are remembered. MEMORY_MIN_TRADES (default 40). */
+  minTrades: number;
+  /** Similar past trades to compare. MEMORY_NEIGHBORS (default 15). */
+  neighbors: number;
+  /** Skip when those trades averaged this % of trade size or worse. MEMORY_SKIP_AVG_PNL_PCT (default -8). */
+  skipAvgPnlPct: number;
+  /** MEMORY_MAX_TRADES (default 2000, oldest dropped). */
+  maxTrades: number;
 }
 
 /** Entry price sanity check (src/risk/entryPriceCheck.ts). */
@@ -250,6 +278,8 @@ export interface EarlyExitParams {
   givebackPct: number;
   /** Sell when no new high for this many seconds and below entry. EXIT_STALL_SECONDS. */
   stallSeconds: number;
+  /** Sell when the pool/curve SOL reserve falls this % between two on-chain reads. EXIT_RESERVE_DROP_PCT. */
+  reserveDropPct?: number;
 }
 
 export interface TokenSnapshot {
@@ -311,7 +341,8 @@ export type ExitReason =
   | "early_fast_drop"
   | "early_red_ticks"
   | "early_giveback"
-  | "early_stall";
+  | "early_stall"
+  | "early_reserve_drop";
 
 export interface Position {
   id: string;

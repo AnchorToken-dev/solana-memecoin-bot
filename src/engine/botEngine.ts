@@ -69,6 +69,7 @@ import { exitFillWarning } from "../strategy/exitFill.js";
 import { checkEntryPrice } from "../risk/entryPriceCheck.js";
 import { ReentryCooldownStore, reentryMinutesFor } from "../risk/reentryCooldown.js";
 import { PriceTape, fetchGeckoCandles } from "../journal/priceTape.js";
+import { TradeMemory, featuresFrom, type MemoryFeatures } from "../strategy/memory.js";
 import {
   ReadOnlySolanaWs,
   emptySolanaWsStatus,
@@ -343,6 +344,9 @@ export class BotEngine {
   /** Price tape (JSONL per day) for the memory feature. */
   private readonly priceTape: PriceTape;
   private noProbeWarned = false;
+  /** Entry memory score (per mode, persisted). Null when off. */
+  private readonly memory: TradeMemory | null;
+  private readonly entryFeatures = new Map<string, MemoryFeatures>();
   private readonly reentryLogged = new Set<string>();
   /** Entry guard: prices seen per mint across scans. */
   private readonly scanPrices = new ScanPriceHistory();
@@ -453,6 +457,7 @@ export class BotEngine {
           fetchCandles: cfg.marketDataSource === "mock" ? null : (m, b, l) => fetchGeckoCandles(m, b, l),
         },
       );
+    this.memory = cfg.memory?.enabled ? new TradeMemory(this.ledger.directory, cfg.memory) : null;
     if (deps?.solanaWs !== undefined) {
       this.solanaWs = deps.solanaWs;
     } else if (this.cfg.solanaRpcWssConfigured === true) {
@@ -1143,6 +1148,11 @@ export class BotEngine {
           this.reentryLogged.delete(pos.mint);
           log.info(`Re-entry cooldown ${pos.symbol}: no new buy for ${mins} min (until ${new Date(b.until).toISOString()})`);
         }
+      }
+      const feats = this.entryFeatures.get(pos.id);
+      this.entryFeatures.delete(pos.id);
+      if (this.memory && feats && pos.entryNotionalUsd > 0) {
+        this.memory.add({ at: pos.openedAt, symbol: pos.symbol, f: feats, pnlPct: (realizedPnlUsd / pos.entryNotionalUsd) * 100 });
       }
       this.priceTape.recordExit({
         tradeId: pos.id,
@@ -2285,6 +2295,8 @@ export class BotEngine {
     nowMs: number,
   ): { positionId: string; reason: import("../types.js").ExitReason; markPrice: number } | null {
     this.markHistory.record(pos.id, mark, nowMs);
+    const ocm = this.onchainMarks.get(pos.mint);
+    if (ocm && ocm.usd === mark && ocm.quoteReserveSol != null) this.markHistory.recordReserve(pos.id, ocm.quoteReserveSol);
     this.markHistory.retain(new Set(this.ledger.openPositions.map((p) => p.id)));
     const p = this.cfg.earlyExit ?? DEFAULT_EARLY_EXIT;
     if (!earlyExitActive(p)) return null;
@@ -2769,6 +2781,7 @@ export class BotEngine {
     let onchainEntryUsd: number | null = null;
     let quoteVsOnchainPct: number | null = null;
     let entryMarket: string | null = null;
+    let entryReserveSol: number | null = null;
     const epc = cfg.entryPriceCheck;
     if (epc?.enabled) {
       const probe = await this.probeOnchainUsd(entry.mint);
@@ -2795,10 +2808,26 @@ export class BotEngine {
         }
         onchainEntryUsd = v.onchainUsd;
         quoteVsOnchainPct = v.gapPct;
-        if (probe.ok) entryMarket = probe.market ?? null;
+        if (probe.ok) {
+          entryMarket = probe.market ?? null;
+          entryReserveSol = probe.quoteReserveSol ?? null;
+        }
       }
     }
     // Paper / dry-run fill at the fresh on-chain price (the scan quote can lag).
+    // Entry memory: skip setups that look like the bot's past losers.
+    const memFeatures = featuresFrom(snaps.find((s) => s.mint === entry.mint), Date.now(), quoteVsOnchainPct, entryReserveSol);
+    if (this.memory) {
+      const mv = this.memory.score(memFeatures);
+      if (mv.skip) {
+        const mins = cfg.entryPriceCheck?.mismatchSkipMinutes ?? 10;
+        this.reentry.block(entry.mint, entry.symbol, mins, "memory_skip");
+        this.reentryLogged.add(entry.mint);
+        log.info(`Skip entry ${entry.symbol}: memory (${mv.detail})`);
+        return false;
+      }
+      log.debug(`Memory ${entry.symbol}: ${mv.detail}`);
+    }
     const entryMark =
       onchainEntryUsd != null && epc?.fillAtOnchain !== false ? onchainEntryUsd : entry.priceUsd;
 
@@ -2877,6 +2906,7 @@ export class BotEngine {
       position = { ...position, tradeSizeUsd: tradeSize.selectedUsd, mode: "paper" };
     }
     ledger.recordBuy(fill, position);
+    this.entryFeatures.set(position.id, memFeatures);
     log.info(
       `Entry signal: ${entry.reason}${onchainEntryUsd != null ? ` · quote vs on-chain ${quoteVsOnchainPct! >= 0 ? "+" : ""}${quoteVsOnchainPct!.toFixed(1)}%` : ""}`,
     );
