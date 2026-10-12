@@ -69,6 +69,10 @@ import { exitFillWarning } from "../strategy/exitFill.js";
 import { checkEntryPrice } from "../risk/entryPriceCheck.js";
 import { ReentryCooldownStore, reentryMinutesFor } from "../risk/reentryCooldown.js";
 import { PriceTape, fetchGeckoCandles } from "../journal/priceTape.js";
+import { ShadowTape, DEFAULT_SHADOW_TAPE, type ShadowPriority } from "../journal/shadowTape.js";
+import { SizeCompare, type SizeCompareSummary } from "../sim/sizeCompare.js";
+import { evaluateCostGate, roundTripCostPct, DEFAULT_COST_GATE } from "../strategy/costGate.js";
+import { memoryTrades } from "../strategy/memory.js";
 import { TradeMemory, featuresFrom } from "../strategy/memory.js";
 import {
   ReadOnlySolanaWs,
@@ -141,7 +145,14 @@ export interface LiveStatus {
 
 export type RunnerState = "stopped" | "starting" | "running" | "stopping";
 
+/** Momentum / scan thresholds: shadow-followed only with spare capacity. */
+const SCAN_FILTER_REASONS = new Set<string>(["too_new", "low_liquidity", "low_volume_24h", "no_momentum", "no_volume_spike"]);
+
 export interface EngineStatus {
+  /** Skipped-coin follow-up tape. */
+  shadowTape?: { enabled: boolean; following: number; started: number; written: number; droppedBusy: number; droppedDup: number };
+  /** $15-vs-shadow-size comparison (paper). */
+  sizeCompare?: SizeCompareSummary | null;
   state: RunnerState;
   paperMode: boolean;
   cycle: number;
@@ -346,6 +357,10 @@ export class BotEngine {
   private noProbeWarned = false;
   /** Entry memory score (per mode, persisted). Null when off. */
   private readonly memory: TradeMemory | null;
+  /** Skipped coins followed on-chain for a few minutes (shadow-tape/). */
+  private readonly shadowTape: ShadowTape;
+  /** Paper: every trade also priced at SIZE_COMPARE_USD (size-compare.jsonl). */
+  private readonly sizeCompare: SizeCompare | null;
   private readonly reentryLogged = new Set<string>();
   /** Entry guard: prices seen per mint across scans. */
   private readonly scanPrices = new ScanPriceHistory();
@@ -457,6 +472,15 @@ export class BotEngine {
         },
       );
     this.memory = cfg.memory?.enabled ? new TradeMemory(this.ledger.directory, cfg.memory) : null;
+    this.shadowTape = new ShadowTape(
+      this.ledger.directory,
+      cfg.shadowTape ?? { ...DEFAULT_SHADOW_TAPE, enabled: false },
+      (mint) => this.probeOnchainUsd(mint).then((r) => (r.ok ? r : null)),
+    );
+    this.sizeCompare =
+      !this.isLiveMode(cfg) && (cfg.sizeCompareUsd ?? 0) > 0
+        ? new SizeCompare(this.ledger.directory, cfg.sizeCompareUsd!, this.broker)
+        : null;
     if (deps?.solanaWs !== undefined) {
       this.solanaWs = deps.solanaWs;
     } else if (this.cfg.solanaRpcWssConfigured === true) {
@@ -523,7 +547,39 @@ export class BotEngine {
       vaultSweep: this.getVaultSweepStatus(),
       buyingPaused: this.buyingPaused,
       positionRecovery: this.positionRecovery,
+      shadowTape: {
+        enabled: this.shadowTape.enabled,
+        following: this.shadowTape.activeCount,
+        ...this.shadowTape.stats,
+      },
+      sizeCompare: this.sizeCompare ? this.sizeCompare.summary() : null,
     };
+  }
+
+  /** Follow a skipped coin on-chain for a few minutes. Never throws, never awaited. */
+  private shadowSkip(
+    e: { mint: string; symbol: string; priceUsd?: number },
+    reason: string,
+    detail: string | undefined,
+    snaps: readonly TokenSnapshot[],
+    priority: ShadowPriority = "filter",
+  ): void {
+    try {
+      if (!this.shadowTape.enabled) return;
+      const snap = snaps.find((x) => x.mint === e.mint);
+      this.shadowTape.track({
+        mint: e.mint,
+        symbol: e.symbol,
+        mode: this.tradingMode,
+        reason,
+        ...(detail ? { detail } : {}),
+        ...(e.priceUsd != null ? { quotePrice: e.priceUsd } : {}),
+        ...(snap ? { snapshot: snap, features: { ...featuresFrom(snap, Date.now(), null, null) } } : {}),
+        priority,
+      });
+    } catch {
+      // never affects trading
+    }
   }
 
   /** Exit levels for a position under the current config (informational). */
@@ -1104,6 +1160,11 @@ export class BotEngine {
       });
       const warn = this.tagExitFill(pos, fill, markPrice, reason, realizedPnlUsd);
       this.ledger.recordSell(fill, realizedPnlUsd, proceedsUsd);
+      try {
+        this.sizeCompare?.onSell(pos, fill, realizedPnlUsd, markPrice, reason, solUsd);
+      } catch (err) {
+        log.warn("size compare (sell) failed", err);
+      }
       this.afterClose(pos, fill, reason, realizedPnlUsd, markPrice, warn);
       await this.recordJournalClose(pos, fill, realizedPnlUsd, warn ?? undefined);
       return fill;
@@ -1149,7 +1210,13 @@ export class BotEngine {
         }
       }
       if (this.memory && pos.entryNotionalUsd > 0) {
-        this.memory.recordClose(pos.id, { symbol: pos.symbol, openedAt: pos.openedAt, pnlPct: (realizedPnlUsd / pos.entryNotionalUsd) * 100 });
+        this.memory.recordClose(pos.id, {
+          symbol: pos.symbol,
+          openedAt: pos.openedAt,
+          closedAt: fill.timestamp ?? Date.now(),
+          pnlPct: (realizedPnlUsd / pos.entryNotionalUsd) * 100,
+          ...(pos.entryPrice > 0 && pos.highWaterPrice > 0 ? { mfePct: (pos.highWaterPrice / pos.entryPrice - 1) * 100 } : {}),
+        });
       }
       this.priceTape.recordExit({
         tradeId: pos.id,
@@ -2004,12 +2071,19 @@ export class BotEngine {
       // API cannot wedge if a tick is mid-flight.
       const STOP_WAIT_MS = 60_000;
       let timedOut = false;
+      // Cancel the guard timer once the loop ends: a left-over 60 s timer kept
+      // the process (and every test file) alive for a minute after stop().
+      const guard = new AbortController();
       await Promise.race([
         this.loopPromise.catch(() => undefined),
-        sleep(STOP_WAIT_MS).then(() => {
-          timedOut = true;
-        }),
+        sleep(STOP_WAIT_MS, guard.signal).then(
+          () => {
+            timedOut = true;
+          },
+          () => undefined,
+        ),
       ]);
+      guard.abort();
       if (timedOut) {
         log.warn(
           `stop(): runner loop still busy after ${STOP_WAIT_MS}ms (likely hung market HTTP); forcing stopped state`,
@@ -2621,6 +2695,10 @@ export class BotEngine {
       );
       for (const r of rejects) {
         log.debug(`Reject ${r.symbol}: ${r.reason} (${r.detail})`);
+        if (r.reason !== "already_open") {
+          const scan = SCAN_FILTER_REASONS.has(r.reason);
+          this.shadowSkip({ mint: r.mint, symbol: r.symbol }, r.reason, r.detail, snaps, scan ? "scan" : "filter");
+        }
       }
     }
 
@@ -2654,6 +2732,7 @@ export class BotEngine {
         this.reentryLogged.add(e.mint);
         log.info(`Skip entry ${e.symbol}: reentry_cooldown (${b.reason}; until ${new Date(b.until).toISOString()})`);
       }
+      this.shadowSkip(e, "reentry_cooldown", b.reason, snaps);
       return false;
     });
     const guard = cfg.entryGuard ?? DEFAULT_ENTRY_GUARD;
@@ -2664,6 +2743,7 @@ export class BotEngine {
         const v = evaluateEntryGuard(snap, this.scanPrices.get(e.mint), guard, now);
         if (v.ok) return true;
         log.info(`Skip entry ${e.symbol}: ${v.reason} (${v.detail})`);
+        this.shadowSkip(e, v.reason ?? "entry_guard", v.detail, snaps);
         return false;
       });
     }
@@ -2717,6 +2797,7 @@ export class BotEngine {
         log.info(
           `Skip entry ${entry.symbol}: ${RUG_FILTER_REASONS.cachedFail} (failed ${cachedFail.reason} earlier; re-check after ${new Date(cachedFail.until).toISOString()})`,
         );
+        this.shadowSkip(entry, `rug:${cachedFail.reason}`, "cached fail", snaps);
         return false;
       }
       const rpc =
@@ -2769,6 +2850,7 @@ export class BotEngine {
         log.info(
           `Skip entry ${entry.symbol}: ${decision.reason}${decision.detail ? ` (${decision.detail})` : ""}`,
         );
+        this.shadowSkip(entry, `rug:${decision.reason}`, decision.detail, snaps);
         return false;
       }
     }
@@ -2801,6 +2883,7 @@ export class BotEngine {
           log.info(
             `Skip entry ${entry.symbol}: price_mismatch (${v.detail})${b ? ` · skipping this coin for ${epc.mismatchSkipMinutes} min` : ""}`,
           );
+          this.shadowSkip(entry, "price_mismatch", v.detail, snaps);
           return false;
         }
         onchainEntryUsd = v.onchainUsd;
@@ -2821,9 +2904,30 @@ export class BotEngine {
         this.reentry.block(entry.mint, entry.symbol, mins, "memory_skip");
         this.reentryLogged.add(entry.mint);
         log.info(`Skip entry ${entry.symbol}: memory (${mv.detail})`);
+        this.shadowSkip(entry, "memory", mv.detail, snaps);
         return false;
       }
       log.debug(`Memory ${entry.symbol}: ${mv.detail}`);
+    }
+    // Expected-cost gate (COST_GATE, default off): similar trades' typical move vs round-trip costs.
+    const cg = cfg.costGate ?? DEFAULT_COST_GATE;
+    const feeModel = cfg.paperBroker.fees && cfg.paperBroker.fees.model === "realistic" ? cfg.paperBroker.fees : null;
+    if (cg.enabled && this.memory && feeModel) {
+      const gateSnap = snaps.find((s) => s.mint === entry.mint);
+      const costPct = roundTripCostPct(feeModel, {
+        notionalUsd: sized.notionalUsd,
+        solUsd: await this.resolveQuoteUsdRate(),
+        ...(gateSnap?.venue ? { venue: gateSnap.venue } : {}),
+        ...(gateSnap && gateSnap.liquidityUsd > 0 ? { liquidityUsd: gateSnap.liquidityUsd } : {}),
+        flatSlippageBps: cfg.paperBroker.slippageBps,
+      });
+      const gv = evaluateCostGate(memoryTrades(this.memory), memFeatures, costPct, cg);
+      if (gv.skip) {
+        log.info(`Skip entry ${entry.symbol}: cost_gate (${gv.detail})`);
+        this.shadowSkip(entry, "cost_gate", gv.detail, snaps);
+        return false;
+      }
+      log.debug(`Cost gate ${entry.symbol}: ${gv.detail}`);
     }
     const entryMark =
       onchainEntryUsd != null && epc?.fillAtOnchain !== false ? onchainEntryUsd : entry.priceUsd;
@@ -2890,17 +2994,28 @@ export class BotEngine {
       void this.refreshLiveBalance();
     } else {
       const entrySnap = snaps.find((s) => s.mint === entry.mint);
+      const buySolUsd = await this.resolveQuoteUsdRate();
       ({ fill, position } = broker.applyBuy({
         mint: entry.mint,
         symbol: entry.symbol,
         markPrice: entryMark,
         notionalUsd: sized.notionalUsd,
         // Realistic paper costs: SOL-priced fees, venue fee tier, size-aware slippage.
-        solUsd: await this.resolveQuoteUsdRate(),
+        solUsd: buySolUsd,
         ...(entrySnap?.venue ? { venue: entrySnap.venue } : {}),
         ...(entrySnap && entrySnap.liquidityUsd > 0 ? { liquidityUsd: entrySnap.liquidityUsd } : {}),
       }));
       position = { ...position, tradeSizeUsd: tradeSize.selectedUsd, mode: "paper" };
+      try {
+        this.sizeCompare?.onBuy(position, {
+          markPrice: entryMark,
+          solUsd: buySolUsd,
+          ...(entrySnap?.venue ? { venue: entrySnap.venue } : {}),
+          ...(entrySnap && entrySnap.liquidityUsd > 0 ? { liquidityUsd: entrySnap.liquidityUsd } : {}),
+        });
+      } catch (err) {
+        log.warn("size compare (buy) failed", err);
+      }
     }
     ledger.recordBuy(fill, position);
     this.memory?.noteEntry(position.id, memFeatures, position.openedAt);

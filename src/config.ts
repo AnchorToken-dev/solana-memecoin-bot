@@ -144,6 +144,25 @@ const ConfigSchema = z.object({
       preCandles: z.boolean(),
     })
     .optional(),
+  shadowTape: z
+    .object({
+      enabled: z.boolean(),
+      seconds: z.number().gte(0).lte(3_600),
+      intervalMs: z.number().gte(1_000),
+      maxConcurrent: z.number().int().gte(0).lte(20),
+      dedupeMinutes: z.number().gte(0),
+    })
+    .optional(),
+  costGate: z
+    .object({
+      enabled: z.boolean(),
+      minTrades: z.number().int().gte(5),
+      neighbors: z.number().int().gte(3),
+      quantile: z.number().gte(0).lte(1),
+      marginMult: z.number().gt(0),
+    })
+    .optional(),
+  sizeCompareUsd: z.number().gte(0).lte(1_000).optional(),
 });
 
 /** Paper-safe knobs allowed on PATCH /config. */
@@ -704,6 +723,21 @@ export function loadConfig(opts?: {
       postExitIntervalMs: envNum("PRICE_TAPE_POST_EXIT_INTERVAL_MS", 5_000),
       preCandles: envBool("PRICE_TAPE_PRE_CANDLES", true),
     },
+    shadowTape: {
+      enabled: envBool("SHADOW_TAPE", true),
+      seconds: envNum("SHADOW_TAPE_SECONDS", 300),
+      intervalMs: envNum("SHADOW_TAPE_INTERVAL_MS", 5_000),
+      maxConcurrent: envNum("SHADOW_TAPE_MAX_CONCURRENT", 4),
+      dedupeMinutes: envNum("SHADOW_TAPE_DEDUPE_MINUTES", 30),
+    },
+    costGate: {
+      enabled: envBool("COST_GATE", false),
+      minTrades: envNum("COST_GATE_MIN_TRADES", 40),
+      neighbors: envNum("COST_GATE_NEIGHBORS", 15),
+      quantile: envNum("COST_GATE_QUANTILE", 0.5),
+      marginMult: envNum("COST_GATE_MARGIN", 1),
+    },
+    sizeCompareUsd: envNum("SIZE_COMPARE_USD", 30),
   };
 
   if (!opts?.skipRuntimeOverlay) {
