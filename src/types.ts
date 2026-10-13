@@ -166,6 +166,8 @@ export interface BotConfig {
   sizeCompareUsd?: number;
   /** Optional pullback entry (src/strategy/pullback.ts), paper only. Absent / pct 0 = off. */
   pullbackEntry?: import("./strategy/pullback.js").PullbackParams;
+  /** Soft-rug score, SHADOW only in this repo (SOFT_RUG_SHADOW=true). Never sells. */
+  softRug?: SoftRugParams;
   /** Trailing take-profit never sells below break-even (Oct 12 review). Optional so older fixtures compile. */
   trailBreakeven?: TrailBreakevenParams;
   /** Entry memory score (src/strategy/memory.ts). Optional so older fixtures compile. */
@@ -464,4 +466,12 @@ export interface EntryReject {
   symbol: string;
   reason: EntryRejectReason;
   detail: string;
+}
+
+/** Soft-rug early-warning model. See src/strategy/softRug.ts. Only "off" | "shadow" are wired here. */
+export interface SoftRugParams {
+  mode: "off" | "shadow" | "exit";
+  threshold: number;
+  minHoldSec: number;
+  modelPath: string;
 }

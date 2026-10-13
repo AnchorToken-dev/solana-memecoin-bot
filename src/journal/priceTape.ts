@@ -203,6 +203,7 @@ export class PriceTape {
     decisionMarkPrice?: number;
     realizedPnlUsd: number;
     exitWarning?: string | null;
+    softRugMaxP?: number | null;
   }): void {
     const t = this.open.get(x.tradeId);
     if (!t) return;
@@ -223,6 +224,7 @@ export class PriceTape {
       decisionMarkPrice: x.decisionMarkPrice ?? null,
       realizedPnlUsd: x.realizedPnlUsd,
       exitWarning: x.exitWarning ?? null,
+      ...(x.softRugMaxP != null ? { softRugMaxP: Math.round(x.softRugMaxP * 1000) / 1000 } : {}),
       marks: t.marks,
     });
     this.trackAfterExit(e, x.at);
