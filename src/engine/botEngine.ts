@@ -73,6 +73,9 @@ import { ShadowTape, DEFAULT_SHADOW_TAPE, type ShadowPriority } from "../journal
 import { SizeCompare, type SizeCompareSummary } from "../sim/sizeCompare.js";
 import { evaluateCostGate, roundTripCostPct, DEFAULT_COST_GATE } from "../strategy/costGate.js";
 import { memoryTrades } from "../strategy/memory.js";
+import { MAX_PENDING_PULLBACKS, checkPullback, pullbackActive } from "../strategy/pullback.js";
+import type { EntrySignal } from "../strategy/momentum.js";
+import type { SizeResult } from "../risk/manager.js";
 import { TradeMemory, featuresFrom } from "../strategy/memory.js";
 import {
   ReadOnlySolanaWs,
@@ -153,6 +156,8 @@ export interface EngineStatus {
   shadowTape?: { enabled: boolean; following: number; started: number; written: number; droppedBusy: number; droppedDup: number };
   /** $15-vs-shadow-size comparison (paper). */
   sizeCompare?: SizeCompareSummary | null;
+  /** Pullback entry experiment (ENTRY_PULLBACK_PCT, paper only). */
+  pullbackEntry: { enabled: boolean; pct: number; windowSec: number; waiting: number; armed: number; filled: number; expired: number };
   state: RunnerState;
   paperMode: boolean;
   cycle: number;
@@ -258,21 +263,42 @@ export function fastExitPollMs(cfg: BotConfig): number {
   return Math.max(250, Math.floor(v));
 }
 
+/** Everything the buy step needs from the entry checks (so a pullback wait can resume it later). */
+interface BuyContext {
+  entry: EntrySignal;
+  snaps: TokenSnapshot[];
+  sized: SizeResult;
+  tradeSize: TradeSizeStatus;
+  memFeatures: ReturnType<typeof featuresFrom>;
+  onchainEntryUsd: number | null;
+  quoteVsOnchainPct: number | null;
+  entryMarket: string | null;
+  entryReserveSol: number | null;
+  rugForTape: unknown;
+}
+
+interface PendingPullback {
+  ctx: BuyContext;
+  refUsd: number;
+  armedAt: number;
+}
+
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
       return;
     }
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(t);
-        reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
-      },
-      { once: true },
-    );
+    const onAbort = () => {
+      clearTimeout(t);
+      reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+    };
+    // Remove the listener when the timer fires (the 1 s watch loop would pile them up otherwise).
+    const t = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -361,6 +387,10 @@ export class BotEngine {
   private readonly shadowTape: ShadowTape;
   /** Paper: every trade also priced at SIZE_COMPARE_USD (size-compare.jsonl). */
   private readonly sizeCompare: SizeCompare | null;
+  /** Coins waiting for a pullback fill (ENTRY_PULLBACK_PCT, paper only). Not persisted: a restart cancels the waits. */
+  private readonly pendingPullbacks = new Map<string, PendingPullback>();
+  private pullbackStats = { armed: 0, filled: 0, expired: 0 };
+  private pullbackWarned = false;
   private readonly reentryLogged = new Set<string>();
   /** Entry guard: prices seen per mint across scans. */
   private readonly scanPrices = new ScanPriceHistory();
@@ -553,6 +583,13 @@ export class BotEngine {
         ...this.shadowTape.stats,
       },
       sizeCompare: this.sizeCompare ? this.sizeCompare.summary() : null,
+      pullbackEntry: {
+        enabled: pullbackActive(this.cfg.pullbackEntry) && !this.isLiveMode(),
+        pct: this.cfg.pullbackEntry?.pct ?? 0,
+        windowSec: this.cfg.pullbackEntry?.windowSec ?? 0,
+        waiting: this.pendingPullbacks.size,
+        ...this.pullbackStats,
+      },
     };
   }
 
@@ -1239,6 +1276,7 @@ export class BotEngine {
    */
   private async probeOnchainUsd(
     mint: string,
+    keepSource = false,
   ): Promise<{ ok: true; priceUsd: number; quoteReserveSol?: number; venue: OnchainVenue; market?: string } | { ok: false; error: string }> {
     const reader = this.probePrice;
     if (!reader) return { ok: false, error: "no Solana RPC configured" };
@@ -1248,7 +1286,8 @@ export class BotEngine {
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message.slice(0, 120) : "read threw" };
     } finally {
-      reader.drop(mint);
+      // Pullback polling keeps the resolved curve/pool between reads (dropped in endPullback).
+      if (!keepSource) reader.drop(mint);
     }
     if (!m) return { ok: false, error: "no pump.fun curve / SOL PumpSwap pool readable" };
     const solUsd = await this.resolveQuoteUsdRate();
@@ -1998,6 +2037,7 @@ export class BotEngine {
     this.stoppedAt = null;
     this.state = "running";
     this.loopPromise = this.runLoop(this.abort.signal).finally(() => {
+      this.clearPullbacks();
       this.state = "stopped";
       this.stoppedAt = Date.now();
       this.abort = null;
@@ -2433,12 +2473,16 @@ export class BotEngine {
     while (true) {
       const left = end - Date.now();
       if (left <= 0) return;
-      if (!this.onchainPrice || step <= 0 || this.ledger.openPositions.length === 0) {
+      const holding = !!this.onchainPrice && this.ledger.openPositions.length > 0;
+      const waiting = this.pendingPullbacks.size > 0;
+      if (step <= 0 || (!holding && !waiting)) {
         await sleep(left, signal);
         return;
       }
       await sleep(Math.min(step, left), signal);
       if (Date.now() >= end) return;
+      if (this.pendingPullbacks.size > 0) await this.pullbackTick();
+      if (!holding) continue;
       try {
         const exits = await this.fastExitTick();
         // Flat after a fast exit: hand back to the full tick (lockouts, next entry).
@@ -2654,6 +2698,9 @@ export class BotEngine {
         void this.vaultSweeper.process().catch(() => undefined);
       }
     }
+
+    // Coins waiting for a pullback: fill or expire them even if no new entry scan happens this cycle.
+    if (this.pendingPullbacks.size > 0) await this.pullbackTick();
 
     // HARD daily loss (all modes): blocks new buys only; exits above already ran.
     if (this.checkHardDailyLoss()) {
@@ -2929,8 +2976,108 @@ export class BotEngine {
       }
       log.debug(`Cost gate ${entry.symbol}: ${gv.detail}`);
     }
+    const buyCtx: BuyContext = {
+      entry, snaps, sized, tradeSize, memFeatures, onchainEntryUsd, quoteVsOnchainPct, entryMarket, entryReserveSol, rugForTape,
+    };
+    // Optional pullback wait (paper only): remember the signal price and buy only after a dip (strategy/pullback.ts).
+    if (pullbackActive(cfg.pullbackEntry) && !this.isLiveMode()) {
+      if (this.probePrice) {
+        if (this.pendingPullbacks.has(entry.mint) || this.pendingPullbacks.size >= MAX_PENDING_PULLBACKS) return false;
+        const refUsd = onchainEntryUsd ?? entry.priceUsd;
+        this.pendingPullbacks.set(entry.mint, { ctx: buyCtx, refUsd, armedAt: Date.now() });
+        this.pullbackStats.armed++;
+        log.info(
+          `Pullback entry: ${entry.symbol} passed all checks at $${refUsd}; waiting up to ${cfg.pullbackEntry!.windowSec}s for a ${cfg.pullbackEntry!.pct}% dip`,
+        );
+        return false;
+      }
+      if (!this.pullbackWarned) {
+        this.pullbackWarned = true;
+        log.warn("ENTRY_PULLBACK_PCT is set but no Solana RPC is configured for on-chain reads; buying at the signal instead");
+      }
+    }
+    return this.executeBuy(buyCtx);
+  }
+
+  /** Once a second (and on every tick): fill or cancel the coins waiting for a pullback. Never throws. */
+  private async pullbackTick(): Promise<number> {
+    const pb = this.cfg.pullbackEntry;
+    if (this.pendingPullbacks.size === 0) return 0;
+    if (!pb || !pullbackActive(pb) || this.isLiveMode() || this.state !== "running") {
+      this.clearPullbacks();
+      return 0;
+    }
+    let bought = 0;
+    for (const [mint, w] of [...this.pendingPullbacks]) {
+      try {
+        if (checkPullback(w.refUsd, null, w.armedAt, Date.now(), pb) === "expired") {
+          this.endPullback(mint);
+          this.pullbackStats.expired++;
+          const mins = this.cfg.entryPriceCheck?.mismatchSkipMinutes ?? 10;
+          this.reentry.block(mint, w.ctx.entry.symbol, mins, "pullback_timeout");
+          log.info(`Pullback entry: ${w.ctx.entry.symbol} did not dip ${pb.pct}% within ${pb.windowSec}s; skipped`);
+          this.shadowSkip(w.ctx.entry, "pullback_timeout", `no ${pb.pct}% dip in ${pb.windowSec}s`, w.ctx.snaps);
+          continue;
+        }
+        const probe = await this.probeOnchainUsd(mint, true);
+        if (this.pendingPullbacks.get(mint) !== w) continue; // cancelled while reading
+        const px = probe.ok ? probe.priceUsd : null;
+        if (px == null || checkPullback(w.refUsd, px, w.armedAt, Date.now(), pb) !== "fill") continue;
+        this.endPullback(mint);
+        // Things may have changed while waiting: re-check the gates a fresh entry faces.
+        const { ledger } = this;
+        if (this.state !== "running" || this.buysHalted || this.checkHardDailyLoss()) continue;
+        if (!canOpenAnother(ledger.openPositions.length, this.cfg)) continue;
+        if (ledger.openPositions.some((p) => p.mint === mint) || this.reentry.get(mint, Date.now())) continue;
+        if (!(await this.entryFundsReady())) continue;
+        const tradeSize = this.getTradeSize();
+        const sized = sizePosition(
+          {
+            cashUsd: ledger.cash,
+            markPrice: px,
+            openCount: ledger.openPositions.length,
+            targetUsd: tradeSize.effectiveUsd,
+            extraCostsUsd: this.entryExtraCostsUsd(tradeSize.effectiveUsd, null),
+          },
+          this.cfg,
+          ledger.realizedPnl,
+        );
+        if (!sized.ok) {
+          log.info(`Pullback entry: ${w.ctx.entry.symbol} dipped but sizing refused it: ${sized.reason}`);
+          continue;
+        }
+        const dipPct = (px / w.refUsd - 1) * 100;
+        const entry: EntrySignal = {
+          ...w.ctx.entry,
+          reason: `${w.ctx.entry.reason} · pullback ${dipPct.toFixed(1)}% after ${((Date.now() - w.armedAt) / 1000).toFixed(0)}s`,
+        };
+        this.pullbackStats.filled++;
+        log.info(`Pullback entry: ${entry.symbol} is ${dipPct.toFixed(1)}% below the signal price; buying`);
+        // Keep the signal-time quote gap on the tape; fill at the dipped on-chain price.
+        if (await this.executeBuy({ ...w.ctx, entry, sized, tradeSize, onchainEntryUsd: px }, px)) bought++;
+      } catch (err) {
+        log.warn(`Pullback check for ${w.ctx.entry.symbol} failed; will retry`, err);
+      }
+    }
+    return bought;
+  }
+
+  private endPullback(mint: string): void {
+    this.pendingPullbacks.delete(mint);
+    this.probePrice?.drop(mint);
+  }
+
+  private clearPullbacks(): void {
+    for (const mint of [...this.pendingPullbacks.keys()]) this.endPullback(mint);
+  }
+
+  /** The buy itself (normal path and pullback fill). */
+  private async executeBuy(ctx: BuyContext, markOverrideUsd?: number): Promise<boolean> {
+    const { cfg, broker, ledger } = this;
+    const { entry, snaps, sized, tradeSize, memFeatures, onchainEntryUsd, quoteVsOnchainPct, entryMarket, entryReserveSol, rugForTape } = ctx;
+    const epc = cfg.entryPriceCheck;
     const entryMark =
-      onchainEntryUsd != null && epc?.fillAtOnchain !== false ? onchainEntryUsd : entry.priceUsd;
+      markOverrideUsd ?? (onchainEntryUsd != null && epc?.fillAtOnchain !== false ? onchainEntryUsd : entry.priceUsd);
 
     let fill: Fill;
     let position: Position;
@@ -3020,7 +3167,7 @@ export class BotEngine {
     ledger.recordBuy(fill, position);
     this.memory?.noteEntry(position.id, memFeatures, position.openedAt);
     log.info(
-      `Entry signal: ${entry.reason}${onchainEntryUsd != null ? ` · quote vs on-chain ${quoteVsOnchainPct! >= 0 ? "+" : ""}${quoteVsOnchainPct!.toFixed(1)}%` : ""}`,
+      `Entry signal: ${entry.reason}${quoteVsOnchainPct != null ? ` · quote vs on-chain ${quoteVsOnchainPct >= 0 ? "+" : ""}${quoteVsOnchainPct.toFixed(1)}%` : ""}`,
     );
     try {
       const snapForTape = snaps.find((s) => s.mint === entry.mint);
@@ -3058,4 +3205,3 @@ export class BotEngine {
     return false;
   }
 }
-
