@@ -164,6 +164,8 @@ export interface BotConfig {
   costGate?: import("./strategy/costGate.js").CostGateParams;
   /** Paper only: also price every trade at this size, log to size-compare.jsonl (0 = off). */
   sizeCompareUsd?: number;
+  /** Optional pullback entry (src/strategy/pullback.ts), paper only. Absent / pct 0 = off. */
+  pullbackEntry?: import("./strategy/pullback.js").PullbackParams;
   /** Trailing take-profit never sells below break-even (Oct 12 review). Optional so older fixtures compile. */
   trailBreakeven?: TrailBreakevenParams;
   /** Entry memory score (src/strategy/memory.ts). Optional so older fixtures compile. */

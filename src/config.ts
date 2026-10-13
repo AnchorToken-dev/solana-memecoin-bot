@@ -163,6 +163,7 @@ const ConfigSchema = z.object({
     })
     .optional(),
   sizeCompareUsd: z.number().gte(0).lte(1_000).optional(),
+  pullbackEntry: z.object({ pct: z.number().gte(0).lte(50), windowSec: z.number().gte(5).lte(600) }).optional(),
 });
 
 /** Paper-safe knobs allowed on PATCH /config. */
@@ -738,6 +739,8 @@ export function loadConfig(opts?: {
       marginMult: envNum("COST_GATE_MARGIN", 1),
     },
     sizeCompareUsd: envNum("SIZE_COMPARE_USD", 30),
+    // Not ENTRY_PULLBACK_WINDOW_SEC (that is the max-pullback entry filter above).
+    pullbackEntry: { pct: envNum("ENTRY_PULLBACK_PCT", 0), windowSec: envNum("ENTRY_PULLBACK_WINDOW_S", 60) },
   };
 
   if (!opts?.skipRuntimeOverlay) {
