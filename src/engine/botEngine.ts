@@ -73,6 +73,7 @@ import { ShadowTape, DEFAULT_SHADOW_TAPE, type ShadowPriority } from "../journal
 import { SizeCompare, type SizeCompareSummary } from "../sim/sizeCompare.js";
 import { evaluateCostGate, roundTripCostPct, DEFAULT_COST_GATE } from "../strategy/costGate.js";
 import { memoryTrades } from "../strategy/memory.js";
+import { SoftRugMonitor, loadModel as loadSoftRugModel } from "../strategy/softRug.js";
 import { MAX_PENDING_PULLBACKS, checkPullback, pullbackActive } from "../strategy/pullback.js";
 import type { EntrySignal } from "../strategy/momentum.js";
 import type { SizeResult } from "../risk/manager.js";
@@ -157,6 +158,7 @@ export interface EngineStatus {
   /** $15-vs-shadow-size comparison (paper). */
   sizeCompare?: SizeCompareSummary | null;
   /** Pullback entry experiment (ENTRY_PULLBACK_PCT, paper only). */
+  softRug: { mode: "off" | "shadow"; modelLoaded: boolean; threshold: number; scored: number; crossed: number };
   pullbackEntry: { enabled: boolean; pct: number; windowSec: number; waiting: number; armed: number; filled: number; expired: number };
   state: RunnerState;
   paperMode: boolean;
@@ -391,6 +393,8 @@ export class BotEngine {
   private readonly pendingPullbacks = new Map<string, PendingPullback>();
   private pullbackStats = { armed: 0, filled: 0, expired: 0 };
   private pullbackWarned = false;
+  /** Soft-rug score (SOFT_RUG_SHADOW=true): log only, never acts. */
+  private softRug: SoftRugMonitor | null = null;
   private readonly reentryLogged = new Set<string>();
   /** Entry guard: prices seen per mint across scans. */
   private readonly scanPrices = new ScanPriceHistory();
@@ -501,6 +505,16 @@ export class BotEngine {
           fetchCandles: cfg.marketDataSource === "mock" ? null : (m, b, l) => fetchGeckoCandles(m, b, l),
         },
       );
+    {
+      const sp = cfg.softRug;
+      if (sp && sp.mode !== "off") {
+        // Shadow only, whatever mode the config says: this repo never sells on the score.
+        const shadow = { ...sp, mode: "shadow" as const };
+        const model = loadSoftRugModel(sp.modelPath);
+        if (!model) log.warn(`Soft-rug model not found at ${sp.modelPath}; soft-rug shadow is idle`);
+        this.softRug = new SoftRugMonitor(shadow, model, join(this.ledger.directory, "softrug-shadow.jsonl"));
+      }
+    }
     this.memory = cfg.memory?.enabled ? new TradeMemory(this.ledger.directory, cfg.memory) : null;
     this.shadowTape = new ShadowTape(
       this.ledger.directory,
@@ -583,6 +597,13 @@ export class BotEngine {
         ...this.shadowTape.stats,
       },
       sizeCompare: this.sizeCompare ? this.sizeCompare.summary() : null,
+      softRug: {
+        mode: this.softRug ? "shadow" : "off",
+        modelLoaded: this.softRug?.model != null,
+        threshold: this.softRug?.params.threshold ?? 0,
+        scored: this.softRug?.stats.scored ?? 0,
+        crossed: this.softRug?.stats.crossed ?? 0,
+      },
       pullbackEntry: {
         enabled: pullbackActive(this.cfg.pullbackEntry) && !this.isLiveMode(),
         pct: this.cfg.pullbackEntry?.pct ?? 0,
@@ -1263,7 +1284,9 @@ export class BotEngine {
         decisionMarkPrice: markPrice,
         realizedPnlUsd,
         exitWarning: warn,
+        softRugMaxP: this.softRug?.maxScore(pos.id) ?? null,
       });
+      this.softRug?.retain(new Set(this.ledger.openPositions.map((p) => p.id)));
     } catch (err) {
       log.warn("afterClose bookkeeping failed (trade itself is recorded)", err);
     }
@@ -2394,6 +2417,24 @@ export class BotEngine {
     const oc = this.onchainMarks.get(pos.mint);
     const fromChain = oc != null && oc.usd === mark;
     this.priceTape.recordMark(pos.id, nowMs, mark, fromChain ? "chain" : "quote", fromChain ? oc.quoteReserveSol : undefined);
+    this.softRugObserve(pos, mark, fromChain ? (oc.quoteReserveSol ?? null) : null, nowMs);
+  }
+
+  /** Soft-rug SHADOW: score, log the first crossing to the journal; never sells. Never throws. */
+  private softRugObserve(pos: Position, mark: number, reserve: number | null, nowMs: number): void {
+    const sr = this.softRug;
+    if (!sr?.active) return;
+    try {
+      const before = sr.stats.crossed;
+      const v = sr.observe(pos, mark, reserve, nowMs);
+      if (sr.stats.crossed > before && v.p != null) {
+        const detail = `shadow score ${(v.p * 100).toFixed(0)}% >= ${(sr.params.threshold * 100).toFixed(0)}% after ${v.tSec.toFixed(0)}s (${((mark / pos.entryPrice - 1) * 100).toFixed(1)}% from entry); no action`;
+        log.info(`Soft-rug ${pos.symbol}: ${detail}`);
+        this.journal.appendEvent({ kind: "soft_rug_shadow", symbol: pos.symbol, mint: pos.mint, detail });
+      }
+    } catch (err) {
+      log.debug("soft-rug shadow scoring failed", err);
+    }
   }
 
   /**

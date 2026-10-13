@@ -163,6 +163,9 @@ const ConfigSchema = z.object({
     })
     .optional(),
   sizeCompareUsd: z.number().gte(0).lte(1_000).optional(),
+  softRug: z
+    .object({ mode: z.enum(["off", "shadow", "exit"]), threshold: z.number().gt(0).lte(1), minHoldSec: z.number().gte(0), modelPath: z.string().min(1) })
+    .optional(),
   pullbackEntry: z.object({ pct: z.number().gte(0).lte(50), windowSec: z.number().gte(5).lte(600) }).optional(),
 });
 
@@ -740,6 +743,13 @@ export function loadConfig(opts?: {
     },
     sizeCompareUsd: envNum("SIZE_COMPARE_USD", 30),
     // Not ENTRY_PULLBACK_WINDOW_SEC (that is the max-pullback entry filter above).
+    // Shadow only: scores open positions and logs; never sells or blocks.
+    softRug: {
+      mode: envBool("SOFT_RUG_SHADOW", false) ? "shadow" : "off",
+      threshold: envNum("SOFT_RUG_THRESHOLD", 0.6),
+      minHoldSec: envNum("SOFT_RUG_MIN_HOLD_S", 3),
+      modelPath: process.env.SOFT_RUG_MODEL?.trim() || "models/softrug-model.json",
+    },
     pullbackEntry: { pct: envNum("ENTRY_PULLBACK_PCT", 0), windowSec: envNum("ENTRY_PULLBACK_WINDOW_S", 60) },
   };
 
