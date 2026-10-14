@@ -170,6 +170,8 @@ export interface BotConfig {
   softRug?: SoftRugParams;
   /** Trailing take-profit never sells below break-even (Oct 12 review). Optional so older fixtures compile. */
   trailBreakeven?: TrailBreakevenParams;
+  /** Move the stop to the entry price once the high-water gain reaches armPct. 0 = off. */
+  breakevenStop?: { armPct: number };
   /** Entry memory score (src/strategy/memory.ts). Optional so older fixtures compile. */
   memory?: MemoryParams;
   /**
@@ -343,6 +345,8 @@ export type ExitReason =
   | "take_profit"
   | "trailing_take_profit"
   | "time_stop"
+  /** Stop moved to entry price after +BREAKEVEN_ARM_PCT (Oct 13 Gemini test). */
+  | "breakeven_stop"
   | "manual_exit"
   | "risk_flat"
   /** Restored position whose tokens were no longer in the wallet at live start (no sell attempted). */

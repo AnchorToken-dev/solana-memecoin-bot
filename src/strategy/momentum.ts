@@ -185,6 +185,19 @@ export function evaluateExit(
     };
   }
 
+  // Break-even stop: once the high-water gain reached armPct, exit at/below entry.
+  const beArm = cfg.breakevenStop?.armPct ?? 0;
+  if (beArm > 0 && updated.entryPrice > 0) {
+    const hwGainPct =
+      ((updated.highWaterPrice - updated.entryPrice) / updated.entryPrice) * 100;
+    if (hwGainPct >= beArm && markPrice <= updated.entryPrice) {
+      return {
+        position: updated,
+        exit: { positionId: updated.id, reason: "breakeven_stop", markPrice },
+      };
+    }
+  }
+
   // Hard take-profit (fixed % gain). 0 disables.
   if (isTakeProfitHit(updated, markPrice, cfg.takeProfitPct)) {
     return {

@@ -24,7 +24,7 @@ export interface ReentryBlock {
   at: number;
 }
 
-const LOSS_REASONS = new Set<string>(["stop_loss", "early_fast_drop", "early_red_ticks", "early_giveback", "early_stall", "early_reserve_drop"]);
+const LOSS_REASONS = new Set<string>(["stop_loss", "early_fast_drop", "early_red_ticks", "early_giveback", "early_stall", "early_reserve_drop", "breakeven_stop"]);
 
 /** Minutes to wait after this exit (0 = no cooldown). */
 export function reentryMinutesFor(
