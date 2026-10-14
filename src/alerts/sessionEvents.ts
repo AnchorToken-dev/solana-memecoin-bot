@@ -115,6 +115,8 @@ export function exitTitle(reason: string | undefined): string {
       return "Manual exit";
     case "time_stop":
       return "Time stop";
+    case "breakeven_stop":
+      return "Break-even stop";
     case "early_fast_drop":
       return "Early exit: fast drop";
     case "early_red_ticks":

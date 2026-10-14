@@ -124,6 +124,7 @@ const ConfigSchema = z.object({
       afterLossMinutes: z.number().gte(0),
     })
     .optional(),
+  breakevenStop: z.object({ armPct: z.number().gte(0) }).optional(),
   trailBreakeven: z
     .object({ enabled: z.boolean(), exitFeePct: z.number().gte(0).lte(50), minProfitPct: z.number().gte(0).lte(50) })
     .optional(),
@@ -709,6 +710,8 @@ export function loadConfig(opts?: {
       afterLossMinutes: envNum("REENTRY_COOLDOWN_AFTER_LOSS_MINUTES", 120),
     },
     // Oct 12 memory review.
+    // Oct 13 Gemini exit test: stop to entry once up +N% (0 = off).
+    breakevenStop: { armPct: envNum("BREAKEVEN_ARM_PCT", 0) },
     trailBreakeven: {
       enabled: envBool("TRAIL_BREAKEVEN_FLOOR", true),
       exitFeePct: envNum("TRAIL_EXIT_FEE_PCT", 2),
