@@ -147,12 +147,20 @@ export function slippageBps(
   return Math.min(cap, Math.max(0, s.slippageBaseBps) + impact);
 }
 
+/**
+ * Where a paper fill's price came from.
+ * curve = pump.fun / PumpSwap itemised model (also what LIVE dry-run still uses).
+ * jupiter_build / jupiter_quote_v1 = a live Jupiter Swap API quote.
+ * fallback = Jupiter was unreachable; offline AMM approximation (0 Jupiter fee).
+ */
+export type PaperFillSource = "curve" | "jupiter_build" | "jupiter_quote_v1" | "fallback";
+
 export interface FeeBreakdown {
   side: "buy" | "sell";
   venue: PaperVenue;
-  /** pump.fun / PumpSwap fee rate used (bps). */
+  /** pump.fun / PumpSwap fee rate used (bps), or the AMM fee implied by a Jupiter quote / fallback. */
   venueFeeBps: number;
-  /** pump.fun / PumpSwap trading fee (USD). */
+  /** pump.fun / PumpSwap trading fee (USD), or the Jupiter-route AMM fee. */
   venueFeeUsd: number;
   pumpPortalFeeUsd: number;
   /** Base + priority fee (USD). */
@@ -166,6 +174,14 @@ export interface FeeBreakdown {
   slippageUsd: number;
   /** SOL/USD used to price SOL costs. */
   solUsd: number;
+  /** Set on Jupiter paper fills. Absent on the curve model (including live dry-run). */
+  fillSource?: PaperFillSource;
+  /** Route label, e.g. "Raydium CLMM 100%" or "offline_fallback". */
+  route?: string;
+  /** Jupiter's own swap fee. 0 on /build and on quote without platformFeeBps. */
+  jupiterFeeBps?: number;
+  /** Why the offline model was used, when fillSource is fallback. */
+  fallbackReason?: string;
 }
 
 function round6(n: number): number {

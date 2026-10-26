@@ -10,6 +10,15 @@ import type { MarketDataProvider } from "../market/data.js";
 import { createMarketData } from "../market/data.js";
 import { IN_POSITION_POLL_INTERVAL_MS } from "../market/http.js";
 import { PaperBroker } from "../broker/paper.js";
+import { solLamportsForBuy } from "../broker/jupiterFill.js";
+import {
+  fetchJupiterSwapQuote,
+  selectJupiterQuotable,
+  SOL_MINT,
+  JUPITER_NO_ROUTE_COOLDOWN_MS,
+  type JupiterQuoteResult,
+  type JupiterSwapRequest,
+} from "../broker/jupiterQuote.js";
 import { PaperLedger } from "../ledger/ledger.js";
 import { evaluateEntries, evaluateExit } from "../strategy/momentum.js";
 import {
@@ -404,6 +413,11 @@ export class BotEngine {
   private readonly fastSellFailAt = new Map<string, number>();
   /** Mints whose mark source was already logged once. */
   private readonly markSourceLogged = new Set<string>();
+  /** Paper: Jupiter said "no route" for this mint until this timestamp. */
+  private readonly jupiterNoRouteUntil = new Map<string, number>();
+  /** Quote captured for the candidate we are about to buy (same cycle / pullback). */
+  private jupiterBuyPlan: { mint: string; notionalUsd: number; at: number; result: JupiterQuoteResult } | null = null;
+  private readonly jupiterQuotes: { quote(req: JupiterSwapRequest): Promise<JupiterQuoteResult> };
   private vaultSweeper: VaultSweeper | null = null;
   /** Invalid LIVE_VAULT_ADDRESS → refuse to start live. */
   private vaultError: string | null = null;
@@ -450,9 +464,12 @@ export class BotEngine {
       hardLossStore?: HardDailyLossStore;
       /** Live vault sweep wiring for tests (signer + rpc; destination still from env). */
       vaultDeps?: { signer: LiveSigner; rpc: LiveRpc; env?: Record<string, string | undefined>; sleep?: (ms: number) => Promise<void> };
+      /** Paper Jupiter quotes. Default hits the Swap API. Tests inject a fake. */
+      jupiterQuotes?: { quote(req: JupiterSwapRequest): Promise<JupiterQuoteResult> };
     },
   ) {
     this.cfg = cfg;
+    this.jupiterQuotes = deps?.jupiterQuotes ?? { quote: (req) => fetchJupiterSwapQuote(req) };
     this.market = deps?.market ?? createMarketData(cfg);
     this.broker = deps?.broker ?? new PaperBroker(cfg);
     // Live keeps its own session ledger so paper numbers never mix with real ones.
@@ -1196,6 +1213,124 @@ export class BotEngine {
     return this.resolveQuoteUsdRate();
   }
 
+  /** Paper Jupiter quotes (fills and/or broad discovery). Live never quotes. */
+  private paperJupiterGate(): boolean {
+    if (this.isLiveMode()) return false;
+    const pb = this.cfg.paperBroker;
+    return pb.fillVenue === "jupiter" || pb.discovery === "broad";
+  }
+
+  /** Jupiter-priced paper fills. Live dry-run keeps the curve model. */
+  private paperJupiterPrices(): boolean {
+    if (this.isLiveMode()) return false;
+    const fees = this.cfg.paperBroker.fees;
+    return this.cfg.paperBroker.fillVenue === "jupiter" && fees != null && fees.model === "realistic";
+  }
+
+  private async quoteJupiterBuy(mint: string, notionalUsd: number, solUsd: number | null): Promise<JupiterQuoteResult> {
+    const fees = this.cfg.paperBroker.fees;
+    const jup = this.cfg.paperBroker.jupiter;
+    if (!fees) return { kind: "unreachable", reason: "no paper fee settings" };
+    const sol = solUsd != null && solUsd > 0 ? solUsd : fees.solUsdFallback;
+    const sized = solLamportsForBuy(fees, notionalUsd, sol);
+    if (!sized) return { kind: "unreachable", reason: "trade size does not cover network and rent" };
+    try {
+      return await this.jupiterQuotes.quote({
+        inputMint: SOL_MINT,
+        outputMint: mint,
+        amountRaw: sized.amountRaw,
+        slippageBps: jup?.slippageBps ?? 50,
+        timeoutMs: jup?.timeoutMs ?? 2_500,
+        ...(jup?.taker ? { taker: jup.taker } : {}),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message.slice(0, 160) : "quote threw";
+      return { kind: "unreachable", reason: msg };
+    }
+  }
+
+  private async quoteJupiterSell(pos: Position, solUsd: number | null): Promise<JupiterQuoteResult> {
+    const jup = this.cfg.paperBroker.jupiter;
+    const decimals = pos.tokenDecimals ?? jup?.tokenDecimals ?? 6;
+    const qty = pos.qty;
+    const raw = Math.round(qty * 10 ** decimals);
+    if (!(raw > 0)) return { kind: "unreachable", reason: "zero token amount" };
+    try {
+      return await this.jupiterQuotes.quote({
+        inputMint: pos.mint,
+        outputMint: SOL_MINT,
+        amountRaw: String(Math.min(raw, Number.MAX_SAFE_INTEGER)),
+        slippageBps: jup?.slippageBps ?? 50,
+        timeoutMs: jup?.timeoutMs ?? 2_500,
+        ...(jup?.taker ? { taker: jup.taker } : {}),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message.slice(0, 160) : "quote threw";
+      return { kind: "unreachable", reason: msg };
+    }
+  }
+
+  /**
+   * Drop mints Jupiter cannot route. If the API is down, keep the list and
+   * let fills use the offline model so the cycle does not stall.
+   */
+  private async applyJupiterQuoteGate(
+    usable: EntrySignal[],
+    snaps: readonly TokenSnapshot[],
+  ): Promise<EntrySignal[]> {
+    const nowMs = Date.now();
+    const fresh = usable.filter((e) => {
+      const until = this.jupiterNoRouteUntil.get(e.mint);
+      if (until == null || until <= nowMs) return true;
+      log.debug(`Skip entry ${e.symbol}: jupiter_no_route (cached)`);
+      return false;
+    });
+    if (fresh.length === 0) {
+      this.jupiterBuyPlan = null;
+      return [];
+    }
+    const solUsd = await this.resolveQuoteUsdRate();
+    const notional = this.getTradeSize().effectiveUsd;
+    const attempts = this.cfg.paperBroker.jupiter?.quoteAttempts ?? 5;
+    const sel = await selectJupiterQuotable(
+      fresh,
+      (e) => this.quoteJupiterBuy(e.mint, notional, solUsd),
+      attempts,
+    );
+    for (const s of sel.skipped) {
+      const first = (this.jupiterNoRouteUntil.get(s.entry.mint) ?? 0) <= nowMs;
+      this.jupiterNoRouteUntil.set(s.entry.mint, nowMs + JUPITER_NO_ROUTE_COOLDOWN_MS);
+      if (first) {
+        log.info(`Skip entry ${s.entry.symbol}: jupiter_no_route (${s.reason})`);
+      }
+      this.shadowSkip(s.entry, "jupiter_no_route", s.reason, snaps);
+    }
+    if (sel.unreachable) {
+      log.warn(
+        `Jupiter quote unreachable (${sel.unreachableReason ?? "no response"}); paper fills use the offline fallback`,
+      );
+    }
+    const winner = sel.entries[0];
+    if (winner && sel.quote) {
+      this.jupiterBuyPlan = {
+        mint: winner.mint,
+        notionalUsd: notional,
+        at: nowMs,
+        result: { kind: "ok", quote: sel.quote },
+      };
+    } else if (winner && sel.unreachable) {
+      this.jupiterBuyPlan = {
+        mint: winner.mint,
+        notionalUsd: notional,
+        at: nowMs,
+        result: { kind: "unreachable", reason: sel.unreachableReason ?? "jupiter unreachable" },
+      };
+    } else {
+      this.jupiterBuyPlan = null;
+    }
+    return sel.entries;
+  }
+
   /**
    * Close one position through the right broker. Paper = identical to main.
    * Live: on failure the position STAYS open (retried next tick) and we alert loudly.
@@ -1210,11 +1345,22 @@ export class BotEngine {
       const solUsd = await this.resolveQuoteUsdRate();
       // That await yields: a concurrent tick / manual exit may have closed it.
       if (!this.ledger.openPositions.some((p) => p.id === pos.id)) return null;
+      let sellQuote: JupiterQuoteResult | null = null;
+      if (this.paperJupiterPrices()) {
+        sellQuote = await this.quoteJupiterSell(pos, solUsd);
+        if (sellQuote.kind !== "ok") {
+          log.warn(
+            `Jupiter sell quote for ${pos.symbol}: ${sellQuote.kind} (${sellQuote.reason}); offline fallback fill`,
+          );
+        }
+      }
       const { fill, proceedsUsd, realizedPnlUsd } = this.broker.applySell({
         position: pos,
         markPrice,
         reason,
         solUsd,
+        ...(sellQuote?.kind === "ok" ? { jupiterQuote: sellQuote.quote } : {}),
+        ...(sellQuote && sellQuote.kind !== "ok" ? { fallbackReason: sellQuote.reason } : {}),
       });
       const warn = this.tagExitFill(pos, fill, markPrice, reason, realizedPnlUsd);
       this.ledger.recordSell(fill, realizedPnlUsd, proceedsUsd);
@@ -2797,7 +2943,13 @@ export class BotEngine {
 
     // Skip coins whose last buy failed / was unbuyable recently (see src/live/buyCooldown.ts).
     // LIVE always; paper when PAPER_SKIP_UNBUYABLE is on (default).
-    const paperRealism = !this.isLiveMode() && cfg.paperBroker.skipUnbuyable === true;
+    // Jupiter paper fills can route graduated / Raydium / non-SOL pairs. The
+    // pump-portal "live couldn't buy this" skip stays on for the curve model.
+    const paperRealism =
+      !this.isLiveMode() &&
+      cfg.paperBroker.skipUnbuyable === true &&
+      cfg.paperBroker.fillVenue !== "jupiter" &&
+      cfg.paperBroker.discovery !== "broad";
     const useCooldown = this.isLiveMode() || paperRealism;
     let usable = useCooldown ? entries.filter((e) => !this.buyCooldowns.blocked(e.mint, now)) : entries;
     if (paperRealism) {
@@ -2835,8 +2987,11 @@ export class BotEngine {
         return false;
       });
     }
+    if (usable.length > 0 && this.paperJupiterGate()) {
+      usable = await this.applyJupiterQuoteGate(usable, snaps);
+    }
     if (usable.length === 0) {
-      log.debug(`Cycle ${cycle}: ${entries.length} entry signal(s), none buyable right now (cooldown / unbuyable)`);
+      log.debug(`Cycle ${cycle}: ${entries.length} entry signal(s), none buyable right now (cooldown / unbuyable / jupiter)`);
       return false;
     }
 
@@ -3183,15 +3338,34 @@ export class BotEngine {
     } else {
       const entrySnap = snaps.find((s) => s.mint === entry.mint);
       const buySolUsd = await this.resolveQuoteUsdRate();
+      let jupiterQuote: JupiterQuoteResult | null = null;
+      if (this.paperJupiterPrices()) {
+        const plan = this.jupiterBuyPlan;
+        const fresh =
+          plan != null &&
+          plan.mint === entry.mint &&
+          Math.abs(plan.notionalUsd - sized.notionalUsd) < 0.01 &&
+          Date.now() - plan.at < 30_000;
+        jupiterQuote = fresh && plan ? plan.result : await this.quoteJupiterBuy(entry.mint, sized.notionalUsd, buySolUsd);
+        if (jupiterQuote.kind === "no_route") {
+          this.jupiterNoRouteUntil.set(entry.mint, Date.now() + JUPITER_NO_ROUTE_COOLDOWN_MS);
+          log.info(`Skip entry ${entry.symbol}: jupiter_no_route (${jupiterQuote.reason})`);
+          this.shadowSkip(entry, "jupiter_no_route", jupiterQuote.reason, snaps);
+          return false;
+        }
+      }
       ({ fill, position } = broker.applyBuy({
         mint: entry.mint,
         symbol: entry.symbol,
         markPrice: entryMark,
         notionalUsd: sized.notionalUsd,
         // Realistic paper costs: SOL-priced fees, venue fee tier, size-aware slippage.
+        // Jupiter paper fills replace the venue fee when fillVenue is jupiter.
         solUsd: buySolUsd,
         ...(entrySnap?.venue ? { venue: entrySnap.venue } : {}),
         ...(entrySnap && entrySnap.liquidityUsd > 0 ? { liquidityUsd: entrySnap.liquidityUsd } : {}),
+        ...(jupiterQuote?.kind === "ok" ? { jupiterQuote: jupiterQuote.quote } : {}),
+        ...(jupiterQuote?.kind === "unreachable" ? { fallbackReason: jupiterQuote.reason } : {}),
       }));
       position = { ...position, tradeSizeUsd: tradeSize.selectedUsd, mode: "paper" };
       try {

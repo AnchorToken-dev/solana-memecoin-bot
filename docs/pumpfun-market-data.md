@@ -66,6 +66,19 @@ Keep Solana pairs whose `dexId` is `pumpfun` or `pumpswap`. Logs clearly
 label this as **fallback, not Pump.fun frontend**. Disable with
 `PUMPFUN_DEXSCREENER_FALLBACK=false`.
 
+## Broad paper discovery
+
+When `PAPER_DISCOVERY=broad` (default if `PAPER_FILL_VENUE=jupiter`) and the
+process is in paper mode, the pump.fun scan also:
+
+- requests graduated coins (`complete=true`)
+- merges DexScreener search hits for `raydium` and `pumpswap`
+- merges [GeckoTerminal](https://api.geckoterminal.com/api/v2/networks/solana/trending_pools) trending Solana pools
+
+Strategy knobs (momentum, age, liquidity floors, stops, take-profit) are not
+changed. Entry then asks Jupiter for a quote and skips mints with no route.
+`PAPER_DISCOVERY=pump` or live mode keeps the hot + new-curve board only.
+
 ## Env knobs
 
 ```bash

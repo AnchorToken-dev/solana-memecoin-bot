@@ -27,6 +27,14 @@ import {
   marketHttpTimeoutMs,
   type FetchLike as HttpFetchLike,
 } from "./http.js";
+import {
+  GECKO_TRENDING_POOLS_URL,
+  isBroadDex,
+  mergeWithReserve,
+  snapshotFromDexPair,
+  snapshotsFromGeckoTrending,
+  venueForDex,
+} from "./broadDiscovery.js";
 
 export const PUMPFUN_FRONTEND_API_BASE_DEFAULT =
   "https://frontend-api-v3.pump.fun";
@@ -52,6 +60,12 @@ export interface PumpFunMarketOptions {
   windowMinutes?: number;
   /** Per-request HTTP timeout ms (default MARKET_HTTP_TIMEOUT_MS / 8000). */
   httpTimeoutMs?: number;
+  /**
+   * pump = current board (hot + new bonding-curve coins).
+   * broad = paper Jupiter universe: also graduated PumpSwap, DexScreener
+   * Raydium/PumpSwap, and GeckoTerminal trending. Default pump.
+   */
+  discovery?: "pump" | "broad";
 }
 
 interface PumpCoin {
@@ -175,6 +189,7 @@ export class PumpFunMarketData {
   private readonly enrichDelayMs: number;
   private readonly windowMs: number;
   private readonly httpTimeoutMs: number;
+  private readonly discovery: "pump" | "broad";
   private readonly priceHistory = new Map<string, PriceSample[]>();
   private readonly priceCache = new Map<string, number>();
   private solPriceCache: { usd: number; at: number } | null = null;
@@ -190,6 +205,7 @@ export class PumpFunMarketData {
     this.enrichDelayMs = opts.enrichDelayMs ?? 120;
     this.windowMs = (opts.windowMinutes ?? 5) * 60_000;
     this.httpTimeoutMs = opts.httpTimeoutMs ?? marketHttpTimeoutMs();
+    this.discovery = opts.discovery ?? "pump";
   }
 
   /** Timed fetch — never hang the runner on a stuck CF / Dex socket. */
@@ -208,6 +224,7 @@ export class PumpFunMarketData {
 
   async scan(limit: number): Promise<TokenSnapshot[]> {
     const n = Math.max(1, Math.min(limit, 50));
+    if (this.discovery === "broad") return this.scanBroad(n);
     try {
       const coins = await this.fetchPumpCandidates(n);
       if (coins.length === 0) {
@@ -326,8 +343,48 @@ export class PumpFunMarketData {
     }
   }
 
-  /** Exposed for tests / dry-run. */
-  async fetchPumpCandidates(limit: number): Promise<PumpCoin[]> {
+  /**
+   * Exposed for tests / dry-run.
+   * default = hot + new bonding-curve coins.
+   * broad = hot + graduated (complete) + a smaller new-curve slice.
+   */
+  async fetchPumpCandidates(limit: number, mix: "default" | "broad" = "default"): Promise<PumpCoin[]> {
+    const byMint = new Map<string, PumpCoin>();
+    const take = (coins: PumpCoin[]): void => {
+      for (const c of coins) {
+        if (!c.mint || c.is_banned) continue;
+        if (!byMint.has(c.mint)) byMint.set(c.mint, c);
+      }
+    };
+    if (mix === "broad") {
+      const third = Math.max(1, Math.ceil(limit / 3));
+      const [hot, graduated, neu] = await Promise.all([
+        this.fetchCoinsList({
+          limit: third,
+          sort: "last_trade_timestamp",
+          order: "DESC",
+          includeNsfw: false,
+        }),
+        this.fetchCoinsList({
+          limit: third,
+          sort: "last_trade_timestamp",
+          order: "DESC",
+          includeNsfw: false,
+          complete: true,
+        }),
+        this.fetchCoinsList({
+          limit: Math.max(1, Math.ceil(limit / 4)),
+          sort: "created_timestamp",
+          order: "DESC",
+          includeNsfw: false,
+          complete: false,
+        }),
+      ]);
+      take(hot);
+      take(graduated);
+      take(neu);
+      return [...byMint.values()].slice(0, limit);
+    }
     // Mix "hot" (last trade) + "new" so paper scan resembles the pump.fun board.
     const half = Math.max(1, Math.ceil(limit / 2));
     const [hot, neu] = await Promise.all([
@@ -345,13 +402,60 @@ export class PumpFunMarketData {
         complete: false,
       }),
     ]);
-
-    const byMint = new Map<string, PumpCoin>();
-    for (const c of [...hot, ...neu]) {
-      if (!c.mint || c.is_banned) continue;
-      if (!byMint.has(c.mint)) byMint.set(c.mint, c);
-    }
+    take(hot);
+    take(neu);
     return [...byMint.values()].slice(0, limit);
+  }
+
+  /**
+   * Paper Jupiter universe. Pump.fun list (including graduated) plus
+   * DexScreener Raydium/PumpSwap and GeckoTerminal trending. Strategy
+   * filters still run later. Never throws.
+   */
+  private async scanBroad(n: number): Promise<TokenSnapshot[]> {
+    let primary: TokenSnapshot[] = [];
+    try {
+      const coins = await this.fetchPumpCandidates(n, "broad");
+      const solUsd = await this.fetchSolPriceUsd();
+      primary = coins
+        .map((c) => this.coinToSnapshot(c, solUsd))
+        .filter((s): s is TokenSnapshot => s !== null);
+      if (this.dexEnrich && primary.length > 0) {
+        primary = await this.enrichWithDexScreener(primary);
+      }
+    } catch (err) {
+      log.warn("Pump.fun broad scan failed; continuing with DexScreener/Gecko", err);
+    }
+    const extra = await this.scanBroadSupplements(n);
+    let merged = mergeWithReserve(primary, extra, n);
+    if (merged.length === 0 && this.dexFallback) {
+      log.info("Broad discovery empty; DexScreener pumpfun/pumpswap/raydium fallback");
+      merged = await this.scanDexSearch(["pumpfun", "pumpswap", "raydium"], n, true);
+    }
+    log.info(
+      `Paper discovery broad: ${merged.length} candidates ` +
+        `(${primary.length} from pump.fun list, ${extra.length} DexScreener/Gecko). Strategy filters unchanged.`,
+    );
+    return merged;
+  }
+
+  /** Graduated / Raydium / PumpSwap supplements. Failures become an empty list. */
+  private async scanBroadSupplements(limit: number): Promise<TokenSnapshot[]> {
+    const dex = await this.scanDexSearch(["raydium", "pumpswap"], limit, true);
+    let gecko: TokenSnapshot[] = [];
+    try {
+      const res = await this.http(GECKO_TRENDING_POOLS_URL, {
+        headers: { accept: "application/json" },
+      });
+      if (res.ok) {
+        gecko = snapshotsFromGeckoTrending(await res.json());
+      } else {
+        log.warn(`GeckoTerminal trending HTTP ${res.status}`);
+      }
+    } catch (err) {
+      log.warn("GeckoTerminal trending failed", err);
+    }
+    return mergeWithReserve(dex, gecko, limit);
   }
 
   private async fetchCoinsList(params: {
@@ -602,11 +706,22 @@ export class PumpFunMarketData {
   /**
    * Labeled fallback: DexScreener search, keep Solana pairs on pumpfun/pumpswap.
    * Not the Pump.fun frontend — used only when that API is down/empty.
+   * Broad discovery uses `scanDexSearch` directly and also keeps Raydium.
    */
   async scanDexScreenerPump(limit: number): Promise<TokenSnapshot[]> {
-    const queries = ["pumpfun", "pumpswap"];
-    const byMint = new Map<string, TokenSnapshot>();
+    const snaps = await this.scanDexSearch(["pumpfun", "pumpswap"], limit, false);
+    log.info(
+      `DexScreener pumpfun/pumpswap fallback: ${snaps.length} candidates (labeled fallback, not Pump.fun frontend)`,
+    );
+    return snaps;
+  }
 
+  /**
+   * DexScreener search → snapshots. `broad` keeps Raydium/Orca/Meteora as well
+   * as pump.fun / PumpSwap. Pump-only fallback passes broad=false.
+   */
+  private async scanDexSearch(queries: string[], limit: number, broad: boolean): Promise<TokenSnapshot[]> {
+    const byMint = new Map<string, TokenSnapshot>();
     for (const q of queries) {
       try {
         const res = await this.http(
@@ -614,7 +729,7 @@ export class PumpFunMarketData {
           { headers: { accept: "application/json" } },
         );
         if (!res.ok) {
-          log.warn(`DexScreener pump fallback search HTTP ${res.status}`);
+          log.warn(`DexScreener search HTTP ${res.status} for ${q}`);
           continue;
         }
         const body = (await res.json()) as {
@@ -631,45 +746,29 @@ export class PumpFunMarketData {
           }>;
         };
         for (const p of body.pairs ?? []) {
-          if (p.chainId !== "solana") continue;
           const dex = (p.dexId ?? "").toLowerCase();
-          if (!PUMP_DEX_IDS.has(dex)) continue;
-          const mint = p.baseToken?.address;
-          if (!mint || !p.priceUsd || byMint.has(mint)) continue;
-          const price = Number(p.priceUsd);
-          if (!(price > 0)) continue;
-          const vol5 = p.volume?.m5 ?? 0;
-          const vol24 = p.volume?.h24 ?? 0;
-          this.priceCache.set(mint, price);
-          this.recordPrice(mint, price);
-          const createdAt = normalizeCreatedAtMs(p.pairCreatedAt);
-          byMint.set(mint, {
-            mint,
-            symbol: p.baseToken?.symbol ?? "???",
-            name: p.baseToken?.name ?? p.baseToken?.symbol ?? mint.slice(0, 8),
-            priceUsd: price,
-            changeWindowPct: p.priceChange?.m5 ?? this.changeFromHistory(mint, price),
-            volumeWindowUsd: vol5,
-            volumeAvgUsd: Math.max(vol24 / 288, 1),
-            volume24hUsd: vol24,
-            liquidityUsd: p.liquidity?.usd ?? 0,
-            timestamp: Date.now(),
-            ...(createdAt != null ? { createdAt } : {}),
-            venue: dex === "pumpswap" ? "pumpswap" : "bonding_curve",
+          if (!broad && !PUMP_DEX_IDS.has(dex)) continue;
+          if (broad && !isBroadDex(dex)) continue;
+          const snap = snapshotFromDexPair(p);
+          if (!snap || byMint.has(snap.mint)) continue;
+          this.priceCache.set(snap.mint, snap.priceUsd);
+          this.recordPrice(snap.mint, snap.priceUsd);
+          const venue = venueForDex(dex);
+          byMint.set(snap.mint, {
+            ...snap,
+            changeWindowPct:
+              p.priceChange?.m5 != null ? p.priceChange.m5 : this.changeFromHistory(snap.mint, snap.priceUsd),
+            ...(venue ? { venue } : {}),
             ...dexPoolFields(p),
           });
           if (byMint.size >= limit) break;
         }
       } catch (err) {
-        log.warn("DexScreener pump fallback failed", err);
+        log.warn("DexScreener search failed", err);
       }
       if (byMint.size >= limit) break;
       await sleep(150);
     }
-
-    log.info(
-      `DexScreener pumpfun/pumpswap fallback: ${byMint.size} candidates (labeled fallback, not Pump.fun frontend)`,
-    );
     return [...byMint.values()].slice(0, limit);
   }
 }

@@ -1,22 +1,28 @@
 import { randomUUID } from "node:crypto";
 import type { BotConfig, ExitReason, Fill, Position } from "../types.js";
+import { log } from "../logging.js";
 import {
   computeBuyCosts,
   computeSellCosts,
   exitLiquidityUsd,
   type PaperVenue,
 } from "./paperFees.js";
+import { describePaperFill, priceJupiterBuy, priceJupiterSell } from "./jupiterFill.js";
+import type { JupiterRouteQuote } from "./jupiterQuote.js";
 
 /**
  * Paper broker — simulates DEX fills. No wallet keys. No on-chain transactions.
  *
  * Cost models (cfg.paperBroker.fees.model):
- *  - realistic (default from loadConfig): pump.fun / PumpSwap fee, PumpPortal
- *    fee, network base + priority fee, token-account rent, and size-aware
- *    slippage. See src/broker/paperFees.ts + docs/paper-fees.md.
+ *  - realistic + fillVenue jupiter (loadConfig default): Jupiter /build quote
+ *    when the caller passes one, otherwise an offline model with no Jupiter
+ *    fee and no PumpPortal fee. See src/broker/jupiterFill.ts.
+ *  - realistic + fillVenue curve (or fillVenue omitted): pump.fun / PumpSwap
+ *    fee, PumpPortal fee, network, rent, size-aware slippage.
  *  - legacy (or no `fees` block): flat FEE_BPS + SLIPPAGE_BPS, exactly as before.
  *
- * Slippage only moves the fill price; it is never also added to feesUsd.
+ * LIVE dry-run does not use this class. Slippage only moves the fill price;
+ * it is never also added to feesUsd.
  */
 export class PaperBroker {
   constructor(private readonly cfg: BotConfig) {}
@@ -24,6 +30,15 @@ export class PaperBroker {
   private realistic() {
     const f = this.cfg.paperBroker.fees;
     return f && f.model === "realistic" ? f : null;
+  }
+
+  /** Jupiter pricing is paper-only and only when the realistic model is on. */
+  private jupiterPrices(): boolean {
+    return this.cfg.paperBroker.fillVenue === "jupiter" && this.realistic() != null;
+  }
+
+  private fallbackFeeBps(): number {
+    return this.cfg.paperBroker.jupiter?.fallbackFeeBps ?? 25;
   }
 
   applyBuy(args: {
@@ -35,6 +50,9 @@ export class PaperBroker {
     solUsd?: number | null;
     venue?: PaperVenue;
     liquidityUsd?: number;
+    /** Live Jupiter quote for this size. Null/absent → offline fallback when fill venue is jupiter. */
+    jupiterQuote?: JupiterRouteQuote | null;
+    fallbackReason?: string;
   }): { fill: Fill; position: Position } {
     const positionId = randomUUID();
     const now = Date.now();
@@ -44,8 +62,29 @@ export class PaperBroker {
     let qty: number;
     let feesUsd: number;
     let slippageUsd: number;
+    let tokenDecimals: number | undefined;
     let breakdown: Fill["feeBreakdown"];
-    if (model) {
+    if (model && this.jupiterPrices()) {
+      const c = priceJupiterBuy(model, {
+        notionalUsd: args.notionalUsd,
+        markPrice: args.markPrice,
+        solUsd: args.solUsd,
+        venue: args.venue,
+        liquidityUsd: args.liquidityUsd,
+        flatSlippageBps: this.cfg.paperBroker.slippageBps,
+        fallbackFeeBps: this.fallbackFeeBps(),
+        quote: args.jupiterQuote,
+        fallbackReason: args.jupiterQuote ? undefined : (args.fallbackReason ?? "no Jupiter quote"),
+        tokenDecimals: this.cfg.paperBroker.jupiter?.tokenDecimals,
+      });
+      fillPrice = c.fillPrice;
+      qty = c.qty;
+      feesUsd = c.breakdown.totalFeesUsd;
+      slippageUsd = c.breakdown.slippageUsd;
+      breakdown = c.breakdown;
+      tokenDecimals = c.tokenDecimals;
+      log.info(describePaperFill("BUY", args.symbol, c.breakdown));
+    } else if (model) {
       const c = computeBuyCosts(model, {
         notionalUsd: args.notionalUsd,
         markPrice: args.markPrice,
@@ -101,6 +140,7 @@ export class PaperBroker {
         ? { entryLiquidityUsd: args.liquidityUsd }
         : {}),
       ...(breakdown ? { entryFeeBreakdown: breakdown } : {}),
+      ...(tokenDecimals != null ? { tokenDecimals } : {}),
     };
 
     return { fill, position };
@@ -111,6 +151,8 @@ export class PaperBroker {
     markPrice: number;
     reason: ExitReason;
     solUsd?: number | null;
+    jupiterQuote?: JupiterRouteQuote | null;
+    fallbackReason?: string;
   }): { fill: Fill; proceedsUsd: number; realizedPnlUsd: number } {
     const model = this.realistic();
     let fillPrice: number;
@@ -118,7 +160,30 @@ export class PaperBroker {
     let proceedsUsd: number;
     let slippageUsd: number;
     let breakdown: Fill["feeBreakdown"];
-    if (model) {
+    if (model && this.jupiterPrices()) {
+      const c = priceJupiterSell(model, {
+        qty: args.position.qty,
+        markPrice: args.markPrice,
+        solUsd: args.solUsd,
+        venue: args.position.venue,
+        liquidityUsd: exitLiquidityUsd(
+          args.position.entryLiquidityUsd,
+          args.position.entryPrice,
+          args.markPrice,
+        ),
+        flatSlippageBps: this.cfg.paperBroker.slippageBps,
+        fallbackFeeBps: this.fallbackFeeBps(),
+        quote: args.jupiterQuote,
+        fallbackReason: args.jupiterQuote ? undefined : (args.fallbackReason ?? "no Jupiter quote"),
+        tokenDecimals: args.position.tokenDecimals,
+      });
+      fillPrice = c.fillPrice;
+      feesUsd = c.breakdown.totalFeesUsd;
+      proceedsUsd = c.proceedsUsd;
+      slippageUsd = c.breakdown.slippageUsd;
+      breakdown = c.breakdown;
+      log.info(describePaperFill("SELL", args.position.symbol, c.breakdown));
+    } else if (model) {
       const c = computeSellCosts(model, {
         qty: args.position.qty,
         markPrice: args.markPrice,
@@ -172,6 +237,6 @@ export class PaperBroker {
 /** Placeholder for future live swaps — intentionally throws. */
 export function liveSwapStub(_args: unknown): never {
   throw new Error(
-    "liveSwapStub: not implemented. Wire Jupiter/Raydium here only after paper validation. Never commit private keys.",
+    "liveSwapStub: not implemented. Paper fills quote Jupiter for simulation only. Live sends stay on PumpPortal. Never commit private keys.",
   );
 }

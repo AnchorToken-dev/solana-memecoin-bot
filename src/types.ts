@@ -44,6 +44,29 @@ export interface PaperBrokerParams {
    * PAPER_SKIP_UNBUYABLE (default on). Absent = off (old fixtures unchanged).
    */
   skipUnbuyable?: boolean;
+  /**
+   * jupiter = paper fills use Jupiter /build quotes (offline fallback if down).
+   * curve = pump.fun / PumpSwap itemised model. Omitted = curve, so old
+   * fixtures stay exact. loadConfig defaults this to jupiter.
+   * LIVE dry-run ignores it.
+   */
+  fillVenue?: "jupiter" | "curve";
+  /**
+   * broad = paper scan also includes graduated PumpSwap, Raydium, and
+   * GeckoTerminal trending. pump = bonding-curve-heavy pump.fun board.
+   * Live mode forces pump even when this is broad.
+   */
+  discovery?: "broad" | "pump";
+  /** Timeouts and fallback fee for Jupiter paper quotes. No API key here. */
+  jupiter?: {
+    timeoutMs: number;
+    /** Slippage tolerance sent to Jupiter. The simulated fill uses the quoted outAmount, not this cap. */
+    slippageBps: number;
+    fallbackFeeBps: number;
+    tokenDecimals: number;
+    quoteAttempts: number;
+    taker?: string;
+  };
 }
 
 export interface RunnerParams {
@@ -377,6 +400,8 @@ export interface Position {
   entryLiquidityUsd?: number;
   /** Paper cost model: itemised buy-side costs. */
   entryFeeBreakdown?: FeeBreakdown;
+  /** Token decimals inferred from a Jupiter buy quote. Sells reuse it. */
+  tokenDecimals?: number;
   /** On-chain signature of the buy (live sends only; null in paper / dry-run). */
   entrySignature?: string | null;
   /** Mode the position was opened in. */

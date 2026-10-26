@@ -281,11 +281,18 @@ export function createMarketData(cfg: BotConfig): MarketDataProvider {
     const apiBase =
       process.env.PUMPFUN_API_BASE?.trim() ||
       "https://frontend-api-v3.pump.fun";
+    const broad = cfg.paperMode && cfg.paperBroker.discovery === "broad";
     log.info(
       `Market data: Pump.fun frontend API (${apiBase})` +
         `${dexEnrich ? " + DexScreener enrich" : ""}` +
-        `${dexFallback ? " + DexScreener pumpfun/pumpswap fallback" : ""}`,
+        `${dexFallback ? " + DexScreener pumpfun/pumpswap fallback" : ""}` +
+        `${broad ? " + broad paper discovery (graduated, Raydium, GeckoTerminal)" : ""}`,
     );
+    if (broad) {
+      log.info(
+        "Paper discovery is broad: strategy thresholds are unchanged. Coins Jupiter cannot quote are skipped. Live mode keeps the pump-only scan.",
+      );
+    }
     log.info(
       "Pump.fun endpoints are unofficial / may break; fills stay PAPER only.",
     );
@@ -295,6 +302,7 @@ export function createMarketData(cfg: BotConfig): MarketDataProvider {
       dexEnrich,
       windowMinutes: cfg.momentum.windowMinutes,
       httpTimeoutMs: marketHttpTimeoutMs(),
+      discovery: broad ? "broad" : "pump",
     });
   }
   if (cfg.marketDataSource === "dexscreener") {

@@ -38,9 +38,11 @@ Cost: PumpPortal takes **0.5%** per trade.
 
 ## Dry-run costs (same model as paper)
 
-Nothing is sent in dry-run, so its P&L is an estimate. It uses the **same
-itemised cost model as paper mode** (`src/broker/paperFees.ts`,
-[paper-fees.md](paper-fees.md)) so practice results are as honest as paper:
+Nothing is sent in dry-run, so its P&L is an estimate. It uses the **pump.fun /
+PumpSwap itemised model** (`computeBuyCosts` in `src/broker/paperFees.ts`,
+[paper-fees.md](paper-fees.md)). Paper mode can price fills from Jupiter
+(`PAPER_FILL_VENUE=jupiter`); that flag does not change dry-run or live sends.
+Live still builds through PumpPortal. Dry-run costs:
 
 - pump.fun bonding-curve fee 1.25% per side, or the PumpSwap market-cap tier for
   graduated coins (same `complete` / dexId detection as paper),

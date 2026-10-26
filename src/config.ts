@@ -10,6 +10,7 @@ import { clampHardDailyLoss } from "./risk/hardDailyLoss.js";
 import { resolveTradingMode, loadLiveSettings } from "./live/mode.js";
 import { LIVE_WALLET_KEYPAIR_PATH_ENV } from "./live/keypair.js";
 import { loadPaperFeeSettings } from "./broker/paperFees.js";
+import { loadPaperExecutionSettings } from "./broker/jupiterFill.js";
 import {
   DEFAULT_RUG_FILTER_FAIL_COOLDOWN_MINUTES,
   DEFAULT_RUG_FILTER_GRAD_MAX_HOLDER_PCT,
@@ -61,6 +62,18 @@ const ConfigSchema = z.object({
         slippageMaxBps: z.number().nonnegative(),
         defaultVenue: z.enum(["bonding_curve", "pumpswap"]),
         solUsdFallback: z.number().positive(),
+      })
+      .optional(),
+    fillVenue: z.enum(["jupiter", "curve"]).optional(),
+    discovery: z.enum(["broad", "pump"]).optional(),
+    jupiter: z
+      .object({
+        timeoutMs: z.number().positive(),
+        slippageBps: z.number().nonnegative(),
+        fallbackFeeBps: z.number().nonnegative(),
+        tokenDecimals: z.number().int().nonnegative(),
+        quoteAttempts: z.number().int().positive(),
+        taker: z.string().min(32).max(44).optional(),
       })
       .optional(),
   }),
@@ -613,6 +626,7 @@ export function loadConfig(opts?: {
       feeBps: envNum("FEE_BPS", file.paperBroker?.feeBps ?? 30),
       // Itemised realistic costs (env only). PAPER_FEE_MODEL=legacy → old flat model.
       fees: loadPaperFeeSettings(process.env),
+      ...loadPaperExecutionSettings(process.env),
       // Skip coins live can't buy (non-SOL pairs, thin PumpSwap pools). Default on.
       skipUnbuyable: !["false", "0", "no", "off"].includes(
         (process.env.PAPER_SKIP_UNBUYABLE ?? "").trim().toLowerCase(),
