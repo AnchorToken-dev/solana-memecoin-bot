@@ -1,10 +1,47 @@
 # Paper trading costs (realistic model)
 
+**Default fill venue is Jupiter** (`PAPER_FILL_VENUE=jupiter`). Buys and sells
+are priced from a Jupiter Swap API `/build` quote (Metis router, **no Jupiter
+swap fee**, no PumpPortal fee). If Jupiter is unreachable, paper uses an
+offline fallback (25 bps AMM fee + the same network/rent/slippage model) and
+logs `source=fallback`. `PAPER_FILL_VENUE=curve` restores the pump.fun numbers
+in the tables below.
+
+LIVE and LIVE dry-run do **not** use Jupiter quotes. Dry-run still estimates
+PumpPortal + pump.fun / PumpSwap costs. Real sends still go through PumpPortal.
+
+Each paper fill logs a line like:
+
+```text
+Paper fill BUY TST: source=jupiter_build route=Raydium 100% jupiterFee=0bps ammFee=18bps slippage=10bps fees=$0.2100 slippageUsd=$0.0400
+```
+
+`feeBreakdown.fillSource` / `route` / `jupiterFeeBps` are stored on the fill.
+`fallbackReason` is set when the offline model was used.
+
+## Discovery (paper only)
+
+`PAPER_DISCOVERY=broad` (the default alongside `PAPER_FILL_VENUE=jupiter`)
+keeps the pump.fun list and also adds graduated coins, DexScreener
+Raydium/PumpSwap pairs, and GeckoTerminal trending Solana pools. Momentum,
+age, liquidity, stop, and take-profit knobs are unchanged. A mint Jupiter
+answers "no route" for is skipped and logged (`jupiter_no_route`). Live mode
+ignores `PAPER_DISCOVERY` and keeps the pump-only scan.
+
+Set both of these to get the previous board and the previous fee model:
+
+```bash
+PAPER_FILL_VENUE=curve
+PAPER_DISCOVERY=pump
+```
+
+## Curve model (PAPER_FILL_VENUE=curve)
+
 Paper P&L used to assume about **$0.24** of costs per $15 round trip (a flat
 0.3% "fee" plus 0.5% slippage on each side). A real $15 round trip through
 PumpPortal on a pump.fun coin costs about **$0.74 in fees (~5%)** before
-slippage. Paper now charges the real, itemised costs by default so paper
-results are a fair preview of live.
+slippage. `PAPER_FILL_VENUE=curve` still charges that itemised pump.fun model
+(and LIVE dry-run always does). Jupiter paper fills do not.
 
 ## What gets charged
 
@@ -67,7 +104,12 @@ estimate too. Real live trades use the actual wallet SOL delta. See
 
 * `PAPER_FEE_MODEL=legacy` — old flat model (`FEE_BPS` + `SLIPPAGE_BPS`), for
   comparing against old results. `FEE_BPS` is ignored (with a warning) under
-  the realistic model.
+  the realistic model. Legacy does not price from Jupiter; set
+  `PAPER_FILL_VENUE=curve` and `PAPER_DISCOVERY=pump` to restore the old board too.
+* `PAPER_FILL_VENUE=jupiter|curve` — Jupiter quotes (default) or the curve table.
+* `PAPER_DISCOVERY=broad|pump` — wider paper universe (default with Jupiter) or pump-only.
+* `PAPER_JUPITER_FALLBACK_FEE_BPS` — AMM fee used only when Jupiter cannot be reached (default 25).
+* `JUPITER_API_KEY` — optional, not required. Do not commit it.
 * `PAPER_PUMPPORTAL_FEE_BPS=0` — if you'd trade without PumpPortal.
 * `PAPER_SLIPPAGE_MODEL=flat` — `SLIPPAGE_BPS` on every trade.
 
