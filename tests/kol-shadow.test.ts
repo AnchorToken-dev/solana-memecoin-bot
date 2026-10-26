@@ -202,14 +202,27 @@ describe("KolShadowLogger", () => {
     }
   });
 
-  it("ignores duplicates, skips coins it can't price (and remembers that), and caps active signals", async () => {
+  it("keeps a buy the pump reader can't price when the feed already has a fill, and names a priceless miss", async () => {
     const h = harness([null], { maxActive: 1 });
     try {
-      await h.logger.onBuy(buy());
-      assert.equal(h.logger.stats.unreadable, 1);
-      await h.logger.onBuy(buy({ tx: "tx2" }));
-      assert.equal(h.logger.stats.unreadable, 2); // negative-cached: no second read
+      await h.logger.onBuy(buy({ program: "axiom-flash" }));
+      await h.logger.flush();
+      assert.equal(h.logger.stats.unreadable, 0);
+      assert.equal(h.logger.stats.loggedUnpriced, 1);
       assert.equal(h.logger.activeCount, 0);
+      const line = h.lines()[0]!;
+      assert.equal(line.venue, "unpriced");
+      assert.equal(line.program, "axiom-flash");
+      assert.equal(line.unpriced, true);
+      assert.ok(Math.abs(line.samples[0]![1] - 0.0001 / 116) < 1e-12);
+      await h.logger.onBuy(buy({ tx: "tx2", program: "axiom-flash" }));
+      await h.logger.flush();
+      assert.equal(h.logger.stats.loggedUnpriced, 2); // cached: no second pump read, buy still kept
+      const router = "RouterNew111111111111111111111111111111111";
+      await h.logger.onBuy(buy({ tx: "tx3", mint: "OtherMint111111111111111111111111111111111", kolPriceUsd: null, solUsd: null, priceSol: null, program: null, programIds: [router] }));
+      assert.equal(h.logger.stats.unreadable, 1);
+      assert.match(h.logger.lastUnreadable ?? "", /reason=no_pump_or_pumpswap_mark/);
+      assert.match(h.logger.lastUnreadable ?? "", new RegExp(router));
     } finally {
       h.clean();
     }

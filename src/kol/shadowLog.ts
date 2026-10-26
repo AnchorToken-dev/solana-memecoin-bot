@@ -11,7 +11,9 @@
  *   tradeTimeMs  the KOL row's own timestamp; lagMs = at - tradeTimeMs (feed delay)
  *   kolPriceUsd / solUsd  the KOL's fill price and the SOL price implied by the row
  *   samples      [[msSinceArrival, priceSol, quoteReserveSol?], ...] on-chain marks
- *   venue        bonding_curve | pumpswap (coins the on-chain reader can't price are skipped)
+ *   venue        bonding_curve | pumpswap | unpriced
+ *                unpriced = the fill was read, but the pump.fun / PumpSwap reader
+ *                has no mark (other DEX programs). One sample, the fill itself.
  *   partial      true if the process stopped before all samples were taken
  */
 import { appendFile, mkdir } from "node:fs/promises";
@@ -50,11 +52,18 @@ export interface KolSignalRecord {
   venue: string;
   samples: SampleRow[];
   partial?: true;
+  /**
+   * The pump.fun / PumpSwap reader had no mark. The fill price from the feed
+   * is still recorded so the buy is readable; there is no follow-up path.
+   */
+  unpriced?: true;
 }
 
 export interface ShadowStats {
   signals: number;
   logged: number;
+  /** Buys written from the feed fill because the pump reader had no mark. */
+  loggedUnpriced: number;
   duplicates: number;
   droppedBusy: number;
   unreadable: number;
@@ -73,12 +82,30 @@ export interface ShadowDeps {
   readCacheMs?: number;
   /** How long a coin the reader can't price is ignored. */
   unreadableTtlMs?: number;
+  /** One line per buy we could not read, naming the program and the reason. */
+  onNote?: (line: string) => void;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (t: unknown) => void;
 }
 
 export const DEFAULT_OFFSETS_S = [2, 3, 5, 8, 13, 20, 33, 45, 63, 90, 123, 180, 243, 300] as const;
+
+/** SOL per token from an explicit fill, else from the feed's USD prices. */
+export function fillPriceSol(buy: KolBuy): number | null {
+  if (buy.priceSol != null && Number.isFinite(buy.priceSol) && buy.priceSol > 0) return buy.priceSol;
+  if (buy.kolPriceUsd != null && buy.kolPriceUsd > 0 && buy.solUsd != null && buy.solUsd > 0) {
+    const p = buy.kolPriceUsd / buy.solUsd;
+    return Number.isFinite(p) && p > 0 ? p : null;
+  }
+  return null;
+}
+
+/** Status text: program name and program ids, never a URL or key. */
+export function unreadableLine(buy: KolBuy, reason: string): string {
+  const ids = buy.programIds && buy.programIds.length > 0 ? buy.programIds.join(",") : "none";
+  return `reason=${reason} tx=${buy.tx} mint=${buy.mint} program=${buy.program ?? "none"} programs=${ids}`;
+}
 
 interface Active {
   rec: KolSignalRecord;
@@ -87,7 +114,9 @@ interface Active {
 }
 
 export class KolShadowLogger {
-  readonly stats: ShadowStats = { signals: 0, logged: 0, duplicates: 0, droppedBusy: 0, unreadable: 0, sampleReadFails: 0 };
+  readonly stats: ShadowStats = { signals: 0, logged: 0, loggedUnpriced: 0, duplicates: 0, droppedBusy: 0, unreadable: 0, sampleReadFails: 0 };
+  /** Latest buy the pump reader could not price and the feed did not price either. */
+  lastUnreadable: string | null = null;
   private readonly active = new Map<string, Active>();
   private readonly doneKeys = new Set<string>();
   private readonly unreadable = new Map<string, number>();
@@ -130,7 +159,12 @@ export class KolShadowLogger {
     const at = this.now();
     const bad = this.unreadable.get(buy.mint);
     if (bad != null && bad > at) {
-      this.stats.unreadable++;
+      const fill = fillPriceSol(buy);
+      if (fill != null) {
+        this.writeUnpriced(buy, at, fill);
+        return;
+      }
+      this.noteUnreadable(buy);
       return;
     }
     if (this.active.size >= this.maxActive) {
@@ -161,15 +195,28 @@ export class KolShadowLogger {
     this.active.set(key, a);
 
     let first: KolMark | null = null;
+    let threw = false;
     try {
       first = await this.readCached(buy.mint);
     } catch {
-      first = null; // a throwing reader must not leak the reserved slot
+      threw = true; // a throwing reader must not leak the reserved slot
+      first = null;
+    }
+    if (threw) {
+      // Transient RPC failure: release the slot and do not cache the mint.
+      this.stats.sampleReadFails++;
+      this.active.delete(key);
+      return;
     }
     if (!first) {
       this.unreadable.set(buy.mint, this.now() + (this.deps.unreadableTtlMs ?? 10 * 60_000));
-      this.stats.unreadable++;
       this.active.delete(key);
+      const fill = fillPriceSol(buy);
+      if (fill != null) {
+        this.writeUnpriced(buy, at, fill);
+        return;
+      }
+      this.noteUnreadable(buy);
       return;
     }
     rec.venue = first.venue;
@@ -200,6 +247,49 @@ export class KolShadowLogger {
       this.write(a.rec);
       this.release(a.rec.mint);
     }
+  }
+
+  /**
+   * The shared on-chain reader only prices pump.fun curves and the canonical
+   * PumpSwap SOL pool. A buy on any other program still has a fill (the feed
+   * row, or the Helius balance delta). Record that fill instead of dropping
+   * the buy. The mint stays negative-cached so we don't re-ask the pump reader.
+   */
+  private writeUnpriced(buy: KolBuy, at: number, fill: number): void {
+    const key = `${buy.tx}:${buy.wallet}`;
+    const program = buy.program ?? (buy.programIds && buy.programIds.length > 0 ? buy.programIds.join(",") : null);
+    const rec: KolSignalRecord = {
+      v: 1,
+      kind: "kol_signal",
+      at,
+      tx: buy.tx,
+      wallet: buy.wallet,
+      rank: this.deps.ranks?.get(buy.wallet) ?? null,
+      kol: buy.kolName,
+      mint: buy.mint,
+      symbol: buy.symbol,
+      program,
+      kolPriceUsd: buy.kolPriceUsd,
+      solUsd: buy.solUsd,
+      volumeUsd: buy.volumeUsd,
+      tradeTimeMs: buy.tradeTimeMs,
+      lagMs: at - buy.tradeTimeMs,
+      venue: "unpriced",
+      samples: [[0, fill]],
+      unpriced: true,
+    };
+    this.stats.loggedUnpriced++;
+    this.rememberDone(key);
+    this.write(rec);
+    const line = unreadableLine(buy, "no_pump_or_pumpswap_mark");
+    this.deps.onNote?.(`unpriced ${line} fillSol=${fill}`);
+  }
+
+  private noteUnreadable(buy: KolBuy): void {
+    this.stats.unreadable++;
+    const line = unreadableLine(buy, "no_pump_or_pumpswap_mark");
+    this.lastUnreadable = line;
+    this.deps.onNote?.(`unreadable ${line}`);
   }
 
   private addSample(rec: KolSignalRecord, at: number, m: KolMark): void {
