@@ -32,6 +32,14 @@ export interface KolBuy {
   /** The row's own timestamp (ms). */
   tradeTimeMs: number;
   program: string | null;
+  /**
+   * SOL per token at the fill, when the feed measured the swap itself
+   * (Helius balance delta). Tracker rows leave this empty and use
+   * kolPriceUsd / solUsd instead.
+   */
+  priceSol?: number | null;
+  /** Every non-infrastructure program id on the transaction. Labels only — not a gate. */
+  programIds?: readonly string[];
 }
 
 export type RejectReason =
