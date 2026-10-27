@@ -15,7 +15,12 @@
  *   KOL_WALLETS=             comma-separated wallets for the Helius feed; otherwise the leaderboard file
  *   KOL_RPC_URL              optional; RPC for price reads (falls back to SOLANA_RPC_URL).
  *                            Use a different provider than the bot's if you can, so the two never share rate limits.
- *   KOL_POLL_MS=3000         how often to poll the feed
+ *   KOL_POLL_MS=3000         tracker poll interval. Helius uses this only when KOL_HELIUS_POLL_MS is unset
+ *   KOL_HELIUS_POLL_MS=10000 Helius quiet time after each wallet sweep (default 10000 when KOL_POLL_MS is unset)
+ *   KOL_HELIUS_MIN_INTERVAL_MS=250  minimum gap between Helius history calls
+ *   KOL_HELIUS_CONCURRENCY=1 max Helius history calls in flight
+ *   KOL_HELIUS_MAX_BACKOFF_MS=60000 cap on the pause after a Helius 429 or other error
+ *   KOL_HELIUS_LIMIT=25      Helius history page size (1–100)
  *   KOL_MAX_ACTIVE=25        most coins tracked at the same time (extra signals are dropped and counted)
  *   KOL_ONLY_LEADERBOARD=false   tracker: true = only wallets in data/kol/leaderboard.json
  *   KOL_SAMPLE_OFFSETS_S=    comma list of seconds, default 2,3,5,8,13,20,33,45,63,90,123,180,243,300 (keep 3 and 3+10/30/60/120/240 so kol-eval lines up)
@@ -38,6 +43,12 @@ const numEnv = (k: string, d: number, min: number, max: number): number => {
   const n = Number(env[k]);
   return Number.isFinite(n) && env[k]?.trim() ? Math.min(max, Math.max(min, n)) : d;
 };
+/** Helius sweeps are one history call per wallet, so the default quiet time is slower than the tracker poll. */
+function heliusPollMs(): number {
+  if (env.KOL_HELIUS_POLL_MS?.trim()) return numEnv("KOL_HELIUS_POLL_MS", 10_000, 1_000, 180_000);
+  if (env.KOL_POLL_MS?.trim()) return numEnv("KOL_POLL_MS", 3_000, 1_000, 180_000);
+  return 10_000;
+}
 const dir = env.KOL_DATA_DIR?.trim() || "data/kol";
 const feed = (env.KOL_FEED?.trim() || "tracker").toLowerCase();
 const rpcUrl = (env.KOL_RPC_URL ?? env.SOLANA_RPC_URL)?.trim();
@@ -81,11 +92,12 @@ const logger = new KolShadowLogger({
 
 let rawLeft = Math.floor(numEnv("KOL_SAVE_RAW", 3, 0, 20));
 let rawN = 0;
-const pollMs = numEnv("KOL_POLL_MS", 3_000, 1_000, 60_000);
+const pollMs = feed === "helius" ? heliusPollMs() : numEnv("KOL_POLL_MS", 3_000, 1_000, 60_000);
 
 interface FeedCounters {
   polls: number;
   errors: number;
+  rateLimits: number;
   rows: number;
   buys: number;
   possibleGaps: number;
@@ -104,15 +116,19 @@ if (feed === "helius") {
     console.error("KOL_FEED=helius needs KOL_WALLETS or data/kol/leaderboard.json. Run npm run kol:leaderboard first, or set KOL_WALLETS.");
     process.exit(1);
   }
+  const minIntervalMs = numEnv("KOL_HELIUS_MIN_INTERVAL_MS", 250, 0, 60_000);
+  const concurrency = Math.max(1, Math.floor(numEnv("KOL_HELIUS_CONCURRENCY", 1, 1, 4)));
+  const maxBackoffMs = numEnv("KOL_HELIUS_MAX_BACKOFF_MS", 60_000, 1_000, 300_000);
   const watch = new HeliusWalletWatch(
     createHeliusHistoryClient(env.HELIUS_API_KEY!.trim(), fetch, numEnv("KOL_HELIUS_LIMIT", 25, 1, 100)),
     wallets,
     (buy) => void logger.onBuy(buy),
-    { pollMs, onNote: (line) => console.log(line) },
+    { pollMs, minIntervalMs, concurrency, maxBackoffMs, onNote: (line) => console.log(line) },
   );
   feedRun = {
     get polls() { return watch.stats.polls; },
     get errors() { return watch.stats.errors; },
+    get rateLimits() { return watch.stats.rateLimits; },
     get rows() { return watch.stats.rows; },
     get buys() { return watch.stats.buys; },
     get possibleGaps() { return watch.stats.possibleGaps; },
@@ -122,7 +138,7 @@ if (feed === "helius") {
     stop: () => watch.stop(),
     start: () => watch.start(),
   };
-  console.log(`KOL shadow logger started (no trading, Helius wallet watch). Poll ${pollMs} ms · ${wallets.length} wallet(s) · ${offsets.length} price samples per signal · output ${join(dir, "signals")}`);
+  console.log(`KOL shadow logger started (no trading, Helius wallet watch). Poll ${pollMs} ms · ${minIntervalMs} ms between history calls · concurrency ${concurrency} · ${wallets.length} wallet(s) · ${offsets.length} price samples per signal · output ${join(dir, "signals")}`);
 } else {
   const poller = new KolTradePoller(new Client({ apiKey: env.SOLANA_TRACKER_API_KEY!.trim() }), (buy) => void logger.onBuy(buy), {
     pollMs,
@@ -139,6 +155,7 @@ if (feed === "helius") {
   feedRun = {
     get polls() { return poller.stats.polls; },
     get errors() { return poller.stats.errors; },
+    rateLimits: 0,
     get rows() { return poller.stats.rows; },
     get buys() { return poller.stats.buys; },
     get possibleGaps() { return poller.stats.possibleGaps; },
@@ -155,9 +172,9 @@ feedRun.start();
 const timer = setInterval(() => {
   const p = feedRun;
   const s = logger.stats;
-  const why = s.lastUnreadable ?? p.lastUnreadable;
+  const why = logger.lastUnreadable ?? p.lastUnreadable;
   console.log(
-    `[${new Date().toISOString()}] polls ${p.polls} (errors ${p.errors}) · new rows ${p.rows} · KOL buys ${p.buys} · tracking ${logger.activeCount} · logged ${s.logged} · ` +
+    `[${new Date().toISOString()}] polls ${p.polls} (errors ${p.errors}, 429s ${p.rateLimits}) · new rows ${p.rows} · KOL buys ${p.buys} · tracking ${logger.activeCount} · logged ${s.logged} · ` +
       `unpriced ${s.loggedUnpriced} · unreadable ${s.unreadable + p.unreadable} · busy-dropped ${s.droppedBusy} · read fails ${s.sampleReadFails} · possible gaps ${p.possibleGaps}` +
       (why ? ` · last unreadable: ${why}` : "") +
       (p.lastError ? ` · last error: ${p.lastError}` : ""),
