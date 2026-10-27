@@ -122,6 +122,23 @@ describe("parseHeliusWalletBuy", () => {
     assert.match(formatHeliusFailure(r), new RegExp(`reason=no_balance_change sig=sigEmptySwap programs=.*${ROUTER}`));
   });
 
+  it("ignores txs where another signer only lists the KOL wallet read-only", () => {
+    const DHPY = "DhpyNWkdxFh3DRPsBrwRwrK3TYC5t7Q4arnSvf3t84HY";
+    const tx = {
+      signature: "sigPassive",
+      feePayer: "BuekUk3YMmm7Agnb4ni1qMCmShVpeBTdQZYNyihyzr7u",
+      instructions: [{ programId: DHPY, accounts: [W] }],
+      tokenTransfers: [],
+      nativeTransfers: [],
+      accountData: [{ account: W, nativeBalanceChange: 0, tokenBalanceChanges: [] }],
+    };
+    const r = parseHeliusWalletBuy(tx, W);
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.equal(r.reason, "wallet_not_involved");
+    assert.equal(r.report, false);
+  });
+
   it("reports two similar received mints instead of guessing", () => {
     const tx = {
       signature: "sigAmbiguous",

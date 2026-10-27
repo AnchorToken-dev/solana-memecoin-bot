@@ -428,7 +428,12 @@ export function parseHeliusWalletBuy(raw: unknown, wallet: string): HeliusBuyRes
   if (received.length === 0) {
     if (spentToken && netSol > DUST) return fail("not_buy", signature, programIds, swapLike);
     const anyToken = [...tokens.values()].some((d) => Math.abs(d) > DUST);
-    if (!anyToken && Math.abs(nativeSol) <= DUST) return fail("no_balance_change", signature, programIds, swapLike);
+    if (!anyToken && Math.abs(nativeSol) <= DUST) {
+      // Third-party bots (e.g. program DhpyN…) list dozens of KOL wallets as read-only
+      // accounts. The KOL did not sign and nothing moved: not their activity.
+      if (feePayerOf(raw, keys) !== wallet) return fail("wallet_not_involved", signature, programIds, false);
+      return fail("no_balance_change", signature, programIds, swapLike);
+    }
     return fail("not_buy", signature, programIds, swapLike);
   }
   if (received.length > 1 && received[1]![1] * 1000 > received[0]![1]) {
