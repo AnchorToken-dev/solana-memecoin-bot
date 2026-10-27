@@ -218,7 +218,7 @@ describe("HeliusWalletWatch", () => {
       { getTransactions: async () => pages[Math.min(i++, pages.length - 1)]! },
       [W],
       (b) => got.push(b.tx),
-      { pollMs: 1000, onNote: (line) => notes.push(line) },
+      { pollMs: 1000, minIntervalMs: 0, onNote: (line) => notes.push(line) },
     );
     await watch.pollOnce();
     assert.deepEqual(got, []);
