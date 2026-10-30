@@ -18,7 +18,8 @@ const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const RETRY_AFTER_CAP_MS = 300_000;
 
 export interface HeliusHistoryClient {
-  getTransactions(wallet: string): Promise<unknown[]>;
+  /** Newest first. `before` asks for the page older than that signature (Helius `before-signature`). */
+  getTransactions(wallet: string, opts?: { before?: string }): Promise<unknown[]>;
 }
 
 export interface HeliusWatchStats {
@@ -32,7 +33,14 @@ export interface HeliusWatchStats {
   rejected: Record<string, number>;
   /** Swap-shaped transactions whose balances still could not be read. */
   unreadable: number;
+  /**
+   * Polls where a wallet may have missed txs: paging older history hit the
+   * per-poll page cap (or a fetch failed mid-paging) while every tx was still new,
+   * so no already-seen signature was reached.
+   */
   possibleGaps: number;
+  /** Extra older-page history calls made to close gaps on busy wallets. */
+  olderPages: number;
   lastError: string | null;
   lastUnreadable: string | null;
 }
@@ -45,6 +53,8 @@ export interface HeliusWatchOptions {
   concurrency?: number;
   /** Cap on the wait after an error or HTTP 429. Default 60s. */
   maxBackoffMs?: number;
+  /** Max history pages per wallet per poll (first page included) when paging older txs. Default 5. */
+  maxPagesPerWallet?: number;
   /** Called for failures that should be visible (program ids + reason). */
   onNote?: (line: string) => void;
   setTimer?: (fn: () => void, ms: number) => unknown;
@@ -101,11 +111,14 @@ export type HeliusFetch = (url: string) => Promise<HeliusFetchResponse>;
 export function createHeliusHistoryClient(apiKey: string, fetchImpl: HeliusFetch = fetch, limit = 25): HeliusHistoryClient {
   const page = Math.min(100, Math.max(1, Math.floor(limit)));
   return {
-    async getTransactions(wallet: string): Promise<unknown[]> {
+    async getTransactions(wallet: string, opts?: { before?: string }): Promise<unknown[]> {
       if (!BASE58.test(wallet)) throw new Error("helius history: wallet is not a public address");
+      const before = opts?.before?.trim();
+      if (before && !/^[1-9A-HJ-NP-Za-km-z]{32,100}$/.test(before)) throw new Error("helius history: before is not a signature");
       const url =
         `https://mainnet.helius-rpc.com/v0/addresses/${encodeURIComponent(wallet)}/transactions` +
-        `?api-key=${encodeURIComponent(apiKey)}&limit=${page}&token-accounts=balanceChanged&commitment=confirmed`;
+        `?api-key=${encodeURIComponent(apiKey)}&limit=${page}&token-accounts=balanceChanged&commitment=confirmed` +
+        (before ? `&before-signature=${encodeURIComponent(before)}` : "");
       try {
         const res = await fetchImpl(url);
         const retryAfterMs = parseRetryAfterMs(headerGet(res, "retry-after"), Date.now());
@@ -136,7 +149,7 @@ type ReadOutcome =
 
 export class HeliusWalletWatch {
   readonly stats: HeliusWatchStats = {
-    polls: 0, errors: 0, rateLimits: 0, rows: 0, buys: 0, rejected: {}, unreadable: 0, possibleGaps: 0, lastError: null, lastUnreadable: null,
+    polls: 0, errors: 0, rateLimits: 0, rows: 0, buys: 0, rejected: {}, unreadable: 0, possibleGaps: 0, olderPages: 0, lastError: null, lastUnreadable: null,
   };
   private readonly seen = new Set<string>();
   private readonly baselined = new Set<string>();
@@ -151,6 +164,7 @@ export class HeliusWalletWatch {
   private readonly minIntervalMs: number;
   private readonly concurrency: number;
   private readonly maxBackoffMs: number;
+  private readonly maxPagesPerWallet: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
 
@@ -165,6 +179,7 @@ export class HeliusWalletWatch {
     this.minIntervalMs = Math.max(0, opts.minIntervalMs ?? 250);
     this.concurrency = Math.max(1, Math.floor(opts.concurrency ?? 1));
     this.maxBackoffMs = Math.max(1_000, opts.maxBackoffMs ?? 60_000);
+    this.maxPagesPerWallet = Math.max(1, Math.floor(opts.maxPagesPerWallet ?? 5));
     this.sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.now = opts.now ?? Date.now;
   }
@@ -221,7 +236,7 @@ export class HeliusWalletWatch {
             await pacer.waitTurn();
             if (stop || this.aborted) continue;
             const wallet = wallets[(start + i) % n]!;
-            const outcome = await this.readWallet(wallet);
+            const outcome = await this.readWallet(wallet, pacer);
             switch (outcome.kind) {
               case "ok":
                 break;
@@ -256,29 +271,76 @@ export class HeliusWalletWatch {
     this.applyBackoff(rateLimited, anyError, retryAfterMs);
   }
 
-  private async readWallet(wallet: string): Promise<ReadOutcome> {
+  private async readWallet(wallet: string, pacer?: StartPacer): Promise<ReadOutcome> {
     let page: unknown[];
     try {
       page = await this.client.getTransactions(wallet);
     } catch (err) {
-      const failure = describeHeliusFailure(err);
-      const message = err instanceof Error ? err.message : String(err);
-      const wait = failure.rateLimit && failure.retryAfterMs > 0
-        ? ` (retry after ${Math.ceil(failure.retryAfterMs / 1000)}s)`
-        : "";
-      this.stats.lastError = redactSecrets(`${message}${wait}`);
-      if (failure.rateLimit) {
-        this.stats.rateLimits++;
-        return { kind: "rate_limit", retryAfterMs: failure.retryAfterMs };
-      }
-      this.stats.errors++;
-      return { kind: "error" };
+      return this.fetchFailure(err);
     }
-    this.ingest(wallet, page);
-    return { kind: "ok" };
+    if (!this.baselined.has(wallet)) {
+      this.ingest(wallet, page, false);
+      return { kind: "ok" };
+    }
+    // A busy wallet can produce more than one page of new txs between polls.
+    // While every tx on the latest page is still new, ask for the next older page
+    // (before the oldest signature) until a known signature shows up, the wallet
+    // runs out of history, or the per-poll page cap is hit.
+    const collected: unknown[] = [...page];
+    const pending = new Set<string>();
+    let gap = false;
+    let outcome: ReadOutcome = { kind: "ok" };
+    let pages = 1;
+    let last = page;
+    while (this.allNew(last, pending)) {
+      for (const tx of last) pending.add(sigOf(tx)!);
+      if (pages >= this.maxPagesPerWallet) { gap = true; break; }
+      const before = sigOf(last[last.length - 1]);
+      if (!before || this.aborted) { gap = true; break; }
+      try {
+        if (pacer) await pacer.waitTurn();
+        if (this.aborted) { gap = true; break; }
+        last = await this.client.getTransactions(wallet, { before });
+      } catch (err) {
+        outcome = this.fetchFailure(err);
+        gap = true;
+        break;
+      }
+      pages++;
+      this.stats.olderPages++;
+      collected.push(...last);
+    }
+    this.ingest(wallet, collected, gap);
+    return outcome;
   }
 
-  private ingest(wallet: string, page: unknown[]): void {
+  /** Non-empty, and every tx has a signature not seen before (nor already collected this poll). */
+  private allNew(page: unknown[], pending: Set<string>): boolean {
+    if (page.length === 0) return false;
+    for (const tx of page) {
+      const sig = sigOf(tx);
+      if (!sig || this.seen.has(sig) || pending.has(sig)) return false;
+    }
+    return true;
+  }
+
+  private fetchFailure(err: unknown): ReadOutcome {
+    const failure = describeHeliusFailure(err);
+    const message = err instanceof Error ? err.message : String(err);
+    const wait = failure.rateLimit && failure.retryAfterMs > 0
+      ? ` (retry after ${Math.ceil(failure.retryAfterMs / 1000)}s)`
+      : "";
+    this.stats.lastError = redactSecrets(`${message}${wait}`);
+    if (failure.rateLimit) {
+      this.stats.rateLimits++;
+      return { kind: "rate_limit", retryAfterMs: failure.retryAfterMs };
+    }
+    this.stats.errors++;
+    return { kind: "error" };
+  }
+
+  /** `page` is newest first (possibly several pages concatenated); processed oldest first. */
+  private ingest(wallet: string, page: unknown[], gap: boolean): void {
     if (!this.baselined.has(wallet)) {
       for (const tx of page) this.remember(sigOf(tx));
       this.baselined.add(wallet);
@@ -310,7 +372,7 @@ export class HeliusWalletWatch {
         this.stats.lastError = redactSecrets(err instanceof Error ? err.message : String(err));
       }
     }
-    if (page.length > 0 && fresh === page.length) this.stats.possibleGaps++;
+    if (gap) this.stats.possibleGaps++;
   }
 
   private applyBackoff(rateLimited: boolean, anyError: boolean, retryAfterMs: number): void {
